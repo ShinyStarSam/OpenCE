@@ -310,9 +310,9 @@ static const struct config_setting config_settings[] =
 		"as the game's own maps' are before they run; false refuses them\n"
 		"(docs/custom_edition_caches.md)." },
 	{ "kevin.enabled", _config_boolean, "false", "HALO_KEVIN", _environment_set_is_true, _platform_desktop,
-		"Kevin, an AI companion: a campaign level played on this computer starts\n"
-		"as co-op, and the second player is Kevin, a Spartan driven by the\n"
-		"game's AI (kevin_bot.c). A prototype; false plays the campaign alone." },
+		"Kevin, an AI companion: in a campaign level played alone on this\n"
+		"computer, a Spartan at your side whom the game's AI drives\n"
+		"(kevin_bot.c). A prototype; false plays the campaign without him." },
 	{ "kevin.actor_variant", _config_string, "\"marine_armored assault rifle\"", "HALO_KEVIN_ACTOR_VARIANT",
 		_environment_value, _platform_desktop,
 		"The AI that drives Kevin: the first actor variant of the level whose\n"
@@ -592,6 +592,12 @@ static const struct config_setting config_settings[] =
 		"A folder to save frames to (with screenshot_every); empty none." },
 	{ "debug.screenshot_every", _config_integer, "0", "HALO_SCREENSHOT_EVERY", _environment_value, _platform_all,
 		"Save every this many frames to screenshot_directory; 0 none." },
+	{ "debug.kevin_view_every", _config_integer, "0", "HALO_KEVIN_VIEW_EVERY", _environment_value, _platform_desktop,
+		"Draw a frame of Kevin's view (kevin_view.c) every this many seconds;\n"
+		"0 only when his AI asks for one." },
+	{ "debug.kevin_view_directory", _config_string, "\"\"", "HALO_KEVIN_VIEW_DIR", _environment_value, _platform_desktop,
+		"A folder to save each frame of Kevin's view to as a BMP file; empty\n"
+		"none." },
 	{ "debug.texture_dump_directory", _config_string, "\"\"", "HALO_TEXTURE_DUMP", _environment_value, _platform_all,
 		"A folder to write every texture to as it is uploaded; empty none." },
 	{ "debug.texture_log", _config_boolean, "false", "HALO_TEXTURE_LOG", _environment_set_is_true, _platform_all,

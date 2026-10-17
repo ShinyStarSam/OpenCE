@@ -402,7 +402,8 @@ symbols in this file:
 #include "tag_files/files.h"
 #include "custom_edition_cache.h" /* port: custom_edition_level_name */
 #include "view_fov.h" /* port: display.fov, before the projection and culling */
-#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, kevin.enabled's second player */
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, Kevin, an AI companion */
+#include "kevin_view.h" /* port: port/linux/game/kevin_view.c, his view drawn off screen */
 
 #if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(__linux__)
 #define HALO_NATIVE_BUILD_INFO 1
@@ -806,8 +807,8 @@ static void create_local_players(
 			"c:\\halo\\SOURCE\\main\\main.c",
 			741,
 			game_connection() == _game_connection_local);
-		/* port: with kevin.enabled, a campaign level gets a second player, Kevin */
-		kevin_bot_set_player_count();
+		/* port: with kevin.enabled, a campaign level gets Kevin, an AI companion */
+		kevin_bot_game_begin();
 		for (i = 0; i < player_spawn_count; i++)
 		{
 			gamepad_index =
@@ -3318,6 +3319,32 @@ static void main_game_render(
 
 		set_window_camera_values(window, observer);
 		window->console_window = FALSE;
+	}
+
+	/* port: Kevin's view (kevin.enabled), a window of its own that yours
+	covers, for his AI to read */
+	if (!force_single_screen && !cinematic_in_progress() &&
+		game_connection() != _game_connection_film_playback)
+	{
+		struct observer_result kevin_camera;
+
+		if (kevin_view_due(&kevin_camera))
+		{
+			window = &global_screenshot_count.windows[player_window_count];
+			compute_window_bounds(
+				0,
+				1,
+				&window->rasterizer_camera.viewport_bounds,
+				&window->rasterizer_camera.window_bounds);
+			kevin_view_bounds(
+				&window->rasterizer_camera.viewport_bounds,
+				&window->rasterizer_camera.window_bounds);
+			window->local_player_index = NONE;
+			set_window_camera_values(window, &kevin_camera);
+			window->console_window = FALSE;
+			kevin_view_set_window(window);
+			player_window_count++;
+		}
 	}
 
 	window = &global_screenshot_count.windows[player_window_count];

@@ -1,8 +1,8 @@
 /*
 KEVIN_BOT.H
 
-Kevin, an AI companion (kevin.enabled): the second player of a local co-op
-campaign game, whose unit the game's AI drives (kevin_bot.c).
+Kevin, an AI companion (kevin.enabled): a Spartan at your side in a
+campaign level, whom the game's AI drives (kevin_bot.c).
 */
 
 #ifndef __KEVIN_BOT_H
@@ -10,13 +10,17 @@ campaign game, whose unit the game's AI drives (kevin_bot.c).
 
 /* ---------- prototypes/KEVIN_BOT.C */
 
-/* main.c's create_local_players, before it makes the players: a campaign
-level played on this computer gets a second player, Kevin */
-void kevin_bot_set_player_count(void);
+/* main.c's create_local_players, before it makes the players: whether
+this game has Kevin (a campaign level played alone on this computer) */
+void kevin_bot_game_begin(void);
 
-/* players.c's players_update_before_game, each tick: gives Kevin's unit its
-actor when he has spawned */
+/* players.c's players_update_before_game, each tick: makes Kevin behind you
+(again, a while after he dies), gives his unit its actor, and keeps him
+with you */
 void kevin_bot_update(void);
+
+/* his unit, or NONE (kevin_view.c) */
+long kevin_bot_unit_index(void);
 
 /* actor_moving.c's actor_move_to_firing_position: when the AI sends Kevin
 to a firing position away from you, he keeps with you instead; TRUE when he
@@ -33,10 +37,6 @@ void kevin_bot_adjust_control(long actor_index, struct unit_control_data *contro
 /* he looks at you while he speaks, for this many ticks (the companion's
 voice, kevin/BRIDGE_PLAN.md) */
 void kevin_bot_set_talking(long ticks);
-
-/* whether this local player is Kevin (render_interpolation.c: his view is
-drawn blended between ticks, his look turning only on ticks) */
-boolean kevin_bot_local_player(short local_player_index);
 
 /* actor_perception.c's actor_compute_prop_target_weight: Kevin's target
 weight for this unit, raised for the enemy you aim at and those near you */
@@ -57,8 +57,7 @@ player does; his body faces where he looks (kevin_bot_adjust_control), and
 an actor otherwise turns to the way it goes before it sets off */
 boolean kevin_bot_moves_freely(long actor_index);
 
-/* whether the AI, not a controller, drives this unit: Kevin's, once it has
-its actor (actors.c's actor_unit_control, players.c's player input) */
+/* whether this unit is Kevin's, with its actor (actor_moving.c) */
 boolean kevin_bot_drives_unit(long unit_index);
 
 #endif

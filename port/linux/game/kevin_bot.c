@@ -2,28 +2,23 @@
 KEVIN_BOT.C
 
 Kevin, an AI companion (kevin.enabled, a prototype; kevin/BRIDGE_PLAN.md in
-the repository). A campaign level played on this computer starts as local
-co-op, and the second player is Kevin: a real Spartan, with the player's
-biped, weapons and co-op's respawns, whose unit the game's AI drives
-instead of a controller.
+the repository): a Spartan, of the player's biped, in his own armour colour,
+with the level's starting weapons, whom the game's AI drives. He is no
+player: you play the campaign alone, with your screen and sound, and he is
+one more of the AI's units at your side.
 
-Each tick the AI writes its units' control first (ai_update), then the
-players' input overwrites a player's (players_update_before_game). The
-game already lets an actor drive a player's unit, but only while player
-input is disabled, as cutscenes do (actors.c's actor_unit_control). Two
-port hooks make that true for Kevin's unit alone: the actor drives it
-(kevin_bot_drives_unit), and his controller's input is not applied.
-
-When Kevin's unit has no actor (he has just spawned or respawned), one is
-made for it: the level's actor variant named by kevin.actor_variant, in
-the first encounter on the structure BSP loaded, told to follow the first
-player; the actor and the encounter are kept active. The AI moves an
-encounter's actors among its firing positions, which can be across the
-level from you; when it sends Kevin to one more than a few units from you,
-he walks to you instead (kevin_bot_move_to_you), and stops near you.
+He is made behind you, on the ground you stand on, once the level has
+started and no cutscene plays (kevin_bot_spawn), and made again there a
+while after he dies. His unit is given an actor: the level's actor variant
+named by kevin.actor_variant, in the first encounter on the structure BSP
+loaded, told to follow the first player; the actor and the encounter are
+kept active. The AI moves an encounter's actors among its firing
+positions, which can be across the level from you; when it sends Kevin to
+one more than a few units from you, he walks to you instead
+(kevin_bot_move_to_you), and stops near you.
 
 Every second the actor's state is written to debug.txt, to see what the AI
-does with a player's unit.
+does with his unit.
 */
 
 #include "cseries.h"
@@ -38,8 +33,10 @@ does with a player's unit.
 #include "ai/path_structure_bsp.h"
 #include "ai/props.h"
 #include "cache/cache_files.h"
+#include "cutscene/cinematics.h"
 #include "game/game.h"
 #include "game/game_allegiance.h"
+#include "game/game_globals.h"
 #include "game/players.h"
 #include "items/weapon_definitions.h"
 #include "items/weapons.h"
@@ -67,12 +64,12 @@ extern short player_spawn_count;
 
 enum
 {
-	/* the local player who is Kevin (the second; the first is you) */
-	KEVIN_LOCAL_PLAYER_INDEX = 1,
 	/* ticks between the lines of the actor's state in debug.txt */
 	KEVIN_LOG_TICKS = 30,
 	/* ticks he stays put, away from you, before he is brought to you */
 	KEVIN_STRANDED_TICKS = 150,
+	/* ticks after his death before he is made again behind you */
+	KEVIN_RESPAWN_TICKS = 10 * 30,
 
 	/* as actors.c's actor_default_state */
 	_kevin_actor_state_none = 0,
@@ -105,6 +102,11 @@ this often (ticks), when it has at least this many more than his own */
 written to debug.txt as a snap, no more than this many lines a second */
 #define KEVIN_SNAP_COSINE 0.9928f
 #define KEVIN_SNAP_LINES 10
+
+/* his armour colour (red, green, blue, of 1) */
+#define KEVIN_ARMOUR_RED 0.12f
+#define KEVIN_ARMOUR_GREEN 0.24f
+#define KEVIN_ARMOUR_BLUE 0.55f
 
 /* in combat the AI moves him as it likes within this of you; further, he
 comes back to you, and so closes on the enemies you close on */
@@ -206,7 +208,9 @@ enum
 
 static struct
 {
-	boolean active;              /* this game has Kevin as its second player */
+	boolean active;              /* this game has Kevin */
+	long unit_index;             /* his, or NONE */
+	long dead_ticks;             /* since he died, or was last not there */
 	long actor_variant_index;    /* the level's, or NONE */
 	long encounter_index;        /* an encounter of the level, or NONE */
 	long log_ticks;
@@ -258,7 +262,7 @@ static struct
 	short your_last_rounds_loaded;
 	short your_shots;
 	short your_trigger_ticks;
-} kevin_bot_globals = { FALSE, NONE, NONE, 0, 0, { 0.f, 0.f, 0.f }, FALSE };
+} kevin_bot_globals = { FALSE, NONE, 0, NONE, NONE, 0, 0, { 0.f, 0.f, 0.f }, FALSE };
 
 /* ---------- private code */
 
@@ -268,6 +272,29 @@ static long kevin_bot_player_unit(
 	long player_index = local_player_get_player_index(local_player_index);
 
 	return player_index != NONE ? player_get(player_index)->unit_index : NONE;
+}
+
+/* his unit, while it is there: none after a revert to a saved game from
+before he was made (its index then another object's, or none), as a
+cutscene's skip is; he is then made again at once */
+static long kevin_bot_unit(
+	void)
+{
+	struct unit_datum *unit;
+
+	if (kevin_bot_globals.unit_index == NONE)
+		return NONE;
+	unit = unit_try_and_get(kevin_bot_globals.unit_index);
+	if (!unit || unit->unit.player_index != NONE)
+	{
+		error(_error_silent, "kevin: his unit 0x%08X is gone (%s)",
+			kevin_bot_globals.unit_index, unit ? "a player has it" : "deleted");
+		kevin_bot_globals.unit_index = NONE;
+		kevin_bot_globals.dead_ticks = KEVIN_RESPAWN_TICKS;
+		return NONE;
+	}
+
+	return kevin_bot_globals.unit_index;
 }
 
 /* the first actor variant of the level whose tag name has kevin.actor_variant in it */
@@ -712,13 +739,65 @@ static void kevin_bot_bring_back_stranded(
 	return;
 }
 
+/* makes him behind you: the player's biped, in his armour colour, with the
+level's first starting weapons (as players.c's player_spawn makes yours);
+NONE while there is no ground behind you for him, or a cutscene plays */
+static long kevin_bot_spawn(
+	void)
+{
+	struct game_globals *game_globals = scenario_get_game_globals();
+	struct game_globals_player_information *player_information;
+	struct object_placement_data placement_data;
+	long your_unit_index = kevin_bot_player_unit(0);
+	real_rgb_color color;
+	real_point3d point;
+	long unit_index;
+	short change_color_index;
+
+	if (your_unit_index == NONE ||
+		cinematic_in_progress() ||
+		!game_globals ||
+		game_globals->player_information.count <= 0 ||
+		TEST_FLAG(unit_get(your_unit_index)->object.damage_flags, _object_dead_bit) ||
+		!kevin_bot_ground_behind_you(your_unit_index, &point))
+	{
+		return NONE;
+	}
+	player_information = TAG_BLOCK_GET_ELEMENT(
+		&game_globals->player_information,
+		0,
+		struct game_globals_player_information);
+	if (player_information->player_unit.index == NONE)
+		return NONE;
+
+	object_placement_data_new(&placement_data, player_information->player_unit.index, NONE);
+	placement_data.position = point;
+	placement_data.forward = unit_get(your_unit_index)->object.forward;
+	placement_data.up = *global_up3d;
+	color.red = KEVIN_ARMOUR_RED;
+	color.green = KEVIN_ARMOUR_GREEN;
+	color.blue = KEVIN_ARMOUR_BLUE;
+	for (change_color_index = 0; change_color_index < NUMBER_OF_OBJECT_CHANGE_COLORS; change_color_index++)
+		placement_data.change_colors[change_color_index] = color;
+	unit_index = object_new(&placement_data);
+	if (unit_index == NONE)
+		return NONE;
+	/* (as player_spawn: the first profile, when the scenario has any) */
+	if (*(long *)((byte *)global_scenario_get() + 0x348) != 0)
+		player_add_equipment(unit_index, 0, TRUE);
+	error(_error_silent, "kevin: made behind you, unit 0x%08X at %.1f %.1f %.1f",
+		unit_index, point.x, point.y, point.z);
+
+	return unit_index;
+}
+
 /* your shots, each second you fire: with what, at what and how far, to
 see how you fight and so how he should */
 static void kevin_bot_log_your_shots(
 	void)
 {
 	long your_unit_index = kevin_bot_player_unit(0);
-	long kevin_unit_index = kevin_bot_player_unit(KEVIN_LOCAL_PLAYER_INDEX);
+	long kevin_unit_index = kevin_bot_unit();
 	struct unit_datum *you;
 	short slot;
 	long weapon_index;
@@ -1652,16 +1731,12 @@ void kevin_bot_set_talking(
 	return;
 }
 
-boolean kevin_bot_local_player(
-	short local_player_index)
-{
-	return kevin_bot_globals.active && local_player_index == KEVIN_LOCAL_PLAYER_INDEX;
-}
-
-void kevin_bot_set_player_count(
+void kevin_bot_game_begin(
 	void)
 {
 	kevin_bot_globals.active = FALSE;
+	kevin_bot_globals.unit_index = NONE;
+	kevin_bot_globals.dead_ticks = KEVIN_RESPAWN_TICKS;
 	kevin_bot_globals.actor_variant_index = NONE;
 	kevin_bot_globals.encounter_index = NONE;
 	kevin_bot_globals.look_valid = FALSE;
@@ -1674,12 +1749,17 @@ void kevin_bot_set_player_count(
 		global_scenario_get()->type == _scenario_type_solo &&
 		player_spawn_count == 1)
 	{
-		player_spawn_count = 2;
 		kevin_bot_globals.active = TRUE;
-		error(_error_silent, "kevin: this level is co-op; the second player is Kevin");
+		error(_error_silent, "kevin: this level has Kevin");
 	}
 
 	return;
+}
+
+long kevin_bot_unit_index(
+	void)
+{
+	return kevin_bot_globals.active ? kevin_bot_unit() : NONE;
 }
 
 void kevin_bot_update(
@@ -1690,17 +1770,34 @@ void kevin_bot_update(
 
 	if (!kevin_bot_globals.active || !ai_globals->ai_initialized_for_map)
 		return;
-	unit_index = kevin_bot_player_unit(KEVIN_LOCAL_PLAYER_INDEX);
-	if (unit_index == NONE)
-		return;
+	unit_index = kevin_bot_unit();
+	if (unit_index != NONE && !TEST_FLAG(unit_get(unit_index)->object.damage_flags, _object_dead_bit))
+	{
+		kevin_bot_globals.dead_ticks = 0;
+	}
+	else
+	{
+		/* dead, or not made yet: made (again) behind you after a while */
+		if (unit_index != NONE && kevin_bot_globals.dead_ticks == 0)
+		{
+			real_point3d position;
+
+			object_get_origin(unit_index, &position);
+			error(_error_silent, "kevin: he died at %.1f %.1f %.1f", position.x, position.y, position.z);
+		}
+		if (++kevin_bot_globals.dead_ticks < KEVIN_RESPAWN_TICKS)
+			return;
+		unit_index = kevin_bot_spawn();
+		if (unit_index == NONE)
+			return;
+		kevin_bot_globals.unit_index = unit_index;
+		kevin_bot_globals.dead_ticks = 0;
+	}
 	unit = unit_get(unit_index);
-	if (TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
-		return;
 
 	if (unit->unit.actor_index == NONE)
 	{
-		/* a level's opening can leave the players attached to an object (a30's
-		lifeboat); the AI can't walk him off it */
+		/* the AI can't walk him off an object he is attached to */
 		if (unit->object.parent_object_index != NONE)
 		{
 			error(_error_silent, "kevin: detached from 0x%08X", unit->object.parent_object_index);
@@ -1737,12 +1834,6 @@ void kevin_bot_update(
 		kevin_bot_log_combat(unit_index);
 		kevin_bot_log_your_shots();
 		kevin_bot_log_snap(unit_index);
-
-		/* his view (the second split screen) turns with the player control's
-		angles, which his controller no longer moves: they follow where the
-		AI aims */
-		if (magnitude_squared3d(&unit->unit.aiming_vector) > 0.f)
-			player_control_set_facing(KEVIN_LOCAL_PLAYER_INDEX, &unit->unit.aiming_vector);
 	}
 	if (++kevin_bot_globals.log_ticks >= KEVIN_LOG_TICKS)
 	{
@@ -1768,7 +1859,7 @@ boolean kevin_bot_move_to_you(
 
 	if (!kevin_bot_globals.active ||
 		actor->meta.unit_index == NONE ||
-		actor->meta.unit_index != kevin_bot_player_unit(KEVIN_LOCAL_PLAYER_INDEX))
+		actor->meta.unit_index != kevin_bot_unit())
 	{
 		return FALSE;
 	}
@@ -1873,7 +1964,7 @@ boolean kevin_bot_drives_unit(
 
 	if (!kevin_bot_globals.active || unit_index == NONE)
 		return FALSE;
-	kevin_unit_index = kevin_bot_player_unit(KEVIN_LOCAL_PLAYER_INDEX);
+	kevin_unit_index = kevin_bot_unit();
 
 	return kevin_unit_index == unit_index && unit_get(unit_index)->unit.actor_index != NONE;
 }

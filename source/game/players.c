@@ -279,7 +279,7 @@ symbols in this file:
 #include "units/units.h"
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
-#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, the AI drives Kevin's unit */
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, Kevin, an AI companion */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -4748,7 +4748,7 @@ void players_update_before_game(
 	short action_index;
 
 	profile_enter(PLAYERS_UPDATE_BEFORE_GAME_PROFILE);
-	/* port: Kevin's unit gets its actor when he spawns (kevin.enabled) */
+	/* port: Kevin, an AI companion, spawned and kept with you (kevin.enabled) */
 	kevin_bot_update();
 	players_coop_note_on_foot();
 	players_coop_rescue_stranded();
@@ -4856,9 +4856,7 @@ void players_update_before_game(
 			if (player->unit_index != NONE && unit_controllable(player->unit_index))
 			{
 				unit = unit_get(player->unit_index);
-				/* port: not Kevin's input when the AI drives his unit (kevin.enabled);
-				with an actor, the branch below leaves the unit to it */
-				if (!players_globals->input_disabled && !kevin_bot_drives_unit(player->unit_index))
+				if (!players_globals->input_disabled)
 				{
 					network_player_log_idle_action(iterator.datum_index, action->control_flags);
 					/* port: not for the keyboard's action key, which only acts

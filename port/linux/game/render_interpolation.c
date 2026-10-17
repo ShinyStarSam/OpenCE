@@ -43,8 +43,6 @@ with their unit, and with what it rides.
 #include "render/render_cameras.h"
 #include "units/units.h"
 
-#include "kevin_bot.h"
-
 /* port/linux/src/port_config.c */
 int config_boolean(const char *name);
 unsigned long config_changes(void);
@@ -700,8 +698,7 @@ static struct observer_result const *render_interpolation_direct_camera(
 		read_at = config_changes();
 		enabled = config_boolean("display.direct_camera");
 	}
-	/* Kevin's facing (kevin_bot.c) turns only on ticks: his view is the blend */
-	if (!enabled || !observer || kevin_bot_local_player(local_player_index) ||
+	if (!enabled || !observer ||
 		director_get_perspective(local_player_index) != _director_perspective_first_person ||
 		director_inhibited_facing(local_player_index) ||
 		cinematic_in_progress())

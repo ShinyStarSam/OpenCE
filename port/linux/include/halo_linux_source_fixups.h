@@ -65,6 +65,14 @@ void halo_vertex_shader_lighting(unsigned long handle);
 /* display.anti_aliasing's pass over a window's 3D view, before the HUD and
 menus (source/render/render.c): the window's bounds on the screen */
 void halo_screen_anti_alias(short x0, short y0, short x1, short y1);
+/* reads a window of the screen without waiting for the GPU, then takes its
+pixels (RGBA, rows from the top) once they have arrived, a frame or more
+later; NULL before (port/linux/game/kevin_view.c, Kevin's view) */
+unsigned char halo_screen_read_begin(short x0, short y0, short x1, short y1);
+unsigned char const *halo_screen_read_end(long *width, long *height);
+/* writes RGBA pixels, rows from the top, to a BMP file at a path of the
+computer's (not the game's Xbox paths); FALSE when it can't */
+unsigned char halo_screen_write_bmp(char const *path, unsigned char const *pixels, long width, long height);
 /* the mouse in the menus (source/interface/ui_widget.c) */
 #include "halo_ui_pointer.h"
 

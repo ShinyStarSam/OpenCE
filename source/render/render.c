@@ -89,6 +89,7 @@ symbols in this file:
 #include "structures/structures.h"
 /* port: static transparent part links for the newly loaded model tags. */
 #include "models/models.h"
+#include "kevin_view.h" /* port: port/linux/game/kevin_view.c, Kevin's view */
 
 /* ---------- constants */
 
@@ -612,12 +613,28 @@ void render_frame(
 	rasterizer_frame_begin(&parameters);
 	rasterizer_windows_begin();
 
+	/* port: Kevin's view (kevin.enabled) first, where the windows after it
+	cover it, and read back */
+	for (window_index = 0; window_index < window_count; window_index++)
+	{
+		window = &windoze[window_index];
+		if (kevin_view_window(window))
+		{
+			render.window_index = window_index;
+			kevin_view_begin();
+			render_player_frame(window, NULL);
+			kevin_view_end(&window->rasterizer_camera.viewport_bounds);
+		}
+	}
+
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
 		long window_type;
 
 		window = &windoze[window_index];
 		render.window_index = window_index;
+		if (kevin_view_window(window))
+			continue;
 		if (window->console_window)
 		{
 			window_type = 0;

@@ -318,7 +318,7 @@ symbols in this file:
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
 #include "networking/network_game_globals.h"
-#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, the AI drives Kevin's unit */
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, Kevin, an AI companion */
 
 /* ---------- constants */
 
@@ -4171,9 +4171,7 @@ static void actor_unit_control(
 	/* port: Kevin's look turns smoothly toward where he means to look (kevin.enabled) */
 	kevin_bot_adjust_control(actor_index, &control_data);
 
-	/* port: and Kevin's, a player whose unit the AI drives (kevin.enabled) */
-	if (unit->unit.player_index == NONE || !player_input_enabled() ||
-		kevin_bot_drives_unit(actor->meta.unit_index))
+	if (unit->unit.player_index == NONE || !player_input_enabled())
 	{
 		if (actor->meta.frozen)
 		{

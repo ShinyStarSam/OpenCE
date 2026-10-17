@@ -112,6 +112,7 @@ symbols in this file:
 #include "saved games/game_state.h"
 #include "rasterizer/rasterizer_console_vars.h"
 #include "rasterizer/rasterizer_model_types.h"
+#include "kevin_view.h" /* port: port/linux/game/kevin_view.c, Kevin's view */
 
 /* ---------- constants */
 
@@ -412,7 +413,9 @@ static boolean object_is_first_person_camera(
 	return (unit_index == object_index &&
 		director_get_perspective(render.local_player_index) ==
 			_director_perspective_first_person) ||
-		scripted_camera_object_is_first_person_camera(object_index);
+		scripted_camera_object_is_first_person_camera(object_index) ||
+		/* port: Kevin's unit, in his view drawn off screen (kevin.enabled) */
+		kevin_view_camera_object(object_index);
 }
 
 static void find_rendered_objects(

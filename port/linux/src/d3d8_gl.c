@@ -5656,6 +5656,200 @@ void halo_screen_anti_alias(short x0, short y0, short x1, short y1)
 	xgpu_gl_state_invalidate();
 }
 
+/* ---------- reading a window of the screen
+
+Kevin's view (port/linux/game/kevin_view.c): a window of the back buffer
+read into a pixel buffer object without waiting for the GPU, and copied
+out once its fence has passed, a frame or more later. Not in the GLES
+builds, whose function lists don't have the fences */
+
+#ifndef HALO_GLES
+static struct
+{
+	GLuint buffer;
+	GLsync fence;
+	GLsizei width, height;
+	unsigned char *pixels;
+	size_t size;
+} screen_read;
+#endif
+
+/* starts reading a window of the back buffer, in the game's units of the
+screen (the read before it, not yet taken, is dropped); FALSE when it can't */
+unsigned char halo_screen_read_begin(short x0, short y0, short x1, short y1)
+{
+#ifdef HALO_GLES
+	(void)x0; (void)y0; (void)x1; (void)y1;
+	return 0;
+#else
+	struct render_target_entry *target;
+	GLint corners[4];
+	GLint framebuffer, pack_buffer, alignment, row_length, skip_rows, skip_pixels;
+
+	if (!device.gl_ready)
+		return 0;
+	target = render_target_get(&device.back_buffer);
+	if (!target)
+		return 0;
+	corners[0] = scaled_pixel(x0, target->target.scale[0]);
+	corners[1] = scaled_pixel(y0, target->target.scale[1]);
+	corners[2] = scaled_pixel(x1, target->target.scale[0]);
+	corners[3] = scaled_pixel(y1, target->target.scale[1]);
+	if (corners[0] < 0)
+		corners[0] = 0;
+	if (corners[1] < 0)
+		corners[1] = 0;
+	if (corners[2] > (GLint)target->target.gl_width)
+		corners[2] = (GLint)target->target.gl_width;
+	if (corners[3] > (GLint)target->target.gl_height)
+		corners[3] = (GLint)target->target.gl_height;
+	if (corners[2] <= corners[0] || corners[3] <= corners[1])
+		return 0;
+	/* (multisampled, its pixels are in the renderbuffer) */
+	render_target_resolve(&target->target);
+	if (screen_read.fence)
+	{
+		glDeleteSync(screen_read.fence);
+		screen_read.fence = NULL;
+	}
+	if (!screen_read.buffer)
+		glGenBuffers(1, &screen_read.buffer);
+	screen_read.width = corners[2] - corners[0];
+	screen_read.height = corners[3] - corners[1];
+
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+	glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+	glGetIntegerv(GL_PACK_ROW_LENGTH, &row_length);
+	glGetIntegerv(GL_PACK_SKIP_ROWS, &skip_rows);
+	glGetIntegerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(target->target.texture, 0));
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, screen_read.buffer);
+	glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)screen_read.width * screen_read.height * 4, NULL, GL_STREAM_READ);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+	glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+	glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+	/* (the target's row zero is the top of the screen: the rows come from
+	the top) */
+	glReadPixels(corners[0], corners[1], screen_read.width, screen_read.height, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	screen_read.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	/* (sent now: without a frame shown, as in a hidden window, nothing else
+	sends the commands, and the fence would never pass) */
+	glFlush();
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
+	glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+	glPixelStorei(GL_PACK_ROW_LENGTH, row_length);
+	glPixelStorei(GL_PACK_SKIP_ROWS, skip_rows);
+	glPixelStorei(GL_PACK_SKIP_PIXELS, skip_pixels);
+	xgpu_gl_state_invalidate();
+
+	return screen_read.fence != NULL;
+#endif
+}
+
+/* the window read, once the GPU has written it: RGBA, rows from the top,
+kept until the next read is taken; NULL while it hasn't (or none began) */
+unsigned char const *halo_screen_read_end(long *width, long *height)
+{
+#ifdef HALO_GLES
+	(void)width; (void)height;
+	return NULL;
+#else
+	GLenum status;
+	GLint pack_buffer;
+	size_t size;
+	unsigned char const *mapped;
+	size_t pixel;
+
+	if (!screen_read.fence)
+		return NULL;
+	status = glClientWaitSync(screen_read.fence, 0, 0);
+	if (status != GL_ALREADY_SIGNALED && status != GL_CONDITION_SATISFIED)
+		return NULL;
+	glDeleteSync(screen_read.fence);
+	screen_read.fence = NULL;
+
+	size = (size_t)screen_read.width * screen_read.height * 4;
+	if (screen_read.size < size)
+	{
+		unsigned char *pixels = realloc(screen_read.pixels, size);
+
+		if (!pixels)
+			return NULL;
+		screen_read.pixels = pixels;
+		screen_read.size = size;
+	}
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, screen_read.buffer);
+	mapped = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)size, GL_MAP_READ_BIT);
+	if (mapped)
+	{
+		memcpy(screen_read.pixels, mapped, size);
+		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+	}
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
+	if (!mapped)
+		return NULL;
+	/* the display ignores destination alpha, which the game uses as scratch */
+	for (pixel = 3; pixel < size; pixel += 4)
+		screen_read.pixels[pixel] = 0xff;
+	*width = screen_read.width;
+	*height = screen_read.height;
+
+	return screen_read.pixels;
+#endif
+}
+
+unsigned char halo_screen_write_bmp(char const *path, unsigned char const *pixels, long width, long height)
+{
+	unsigned char header[54] = { 'B', 'M' };
+	unsigned long image_size = (unsigned long)width * height * 4;
+	unsigned char *row;
+	FILE *file;
+	long y, x;
+
+	if (width <= 0 || height <= 0)
+		return 0;
+	row = malloc((size_t)width * 4);
+	if (!row)
+		return 0;
+	file = fopen(path, "wb");
+	if (!file)
+	{
+		free(row);
+		return 0;
+	}
+	*(unsigned int *)(header + 2) = (unsigned int)(54 + image_size);
+	*(unsigned int *)(header + 10) = 54;
+	*(unsigned int *)(header + 14) = 40;
+	*(int *)(header + 18) = (int)width;
+	*(int *)(header + 22) = -(int)height; /* rows from the top */
+	*(unsigned short *)(header + 26) = 1;
+	*(unsigned short *)(header + 28) = 32;
+	*(unsigned int *)(header + 34) = (unsigned int)image_size;
+	fwrite(header, 1, sizeof(header), file);
+	for (y = 0; y < height; y++)
+	{
+		unsigned char const *source = pixels + (size_t)y * width * 4;
+
+		/* (a BMP's pixels are BGRA) */
+		for (x = 0; x < width; x++)
+		{
+			row[x * 4 + 0] = source[x * 4 + 2];
+			row[x * 4 + 1] = source[x * 4 + 1];
+			row[x * 4 + 2] = source[x * 4 + 0];
+			row[x * 4 + 3] = source[x * 4 + 3];
+		}
+		fwrite(row, 1, (size_t)width * 4, file);
+	}
+	fclose(file);
+	free(row);
+
+	return 1;
+}
+
 /* ---------- presentation */
 
 #ifndef HALO_GLES
