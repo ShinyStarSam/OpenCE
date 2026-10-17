@@ -462,6 +462,37 @@ void voice_audio_play(int speaker, unsigned short sequence, const unsigned char 
 	pthread_mutex_unlock(&voice_lock);
 }
 
+void voice_audio_play_samples(int speaker, const float *samples, int count, float gain, float pan)
+{
+	struct voice_slot *slot;
+
+	if (count <= 0)
+		return;
+	pthread_mutex_lock(&voice_lock);
+	slot = voice_slot_for(speaker, TRUE);
+	if (slot)
+	{
+		slot->heard_ms = SDL_GetTicks();
+		slot->gain = gain < 0.0f ? 0.0f : gain > 2.0f ? 2.0f : gain;
+		slot->pan = pan < -1.0f ? -1.0f : pan > 1.0f ? 1.0f : pan;
+		voice_slot_put(slot, samples, count);
+	}
+	pthread_mutex_unlock(&voice_lock);
+}
+
+int voice_audio_buffered(int speaker)
+{
+	struct voice_slot *slot;
+	int count = 0;
+
+	pthread_mutex_lock(&voice_lock);
+	slot = voice_slot_for(speaker, FALSE);
+	if (slot)
+		count = slot->count;
+	pthread_mutex_unlock(&voice_lock);
+	return count;
+}
+
 void voice_audio_forget(int speaker)
 {
 	struct voice_slot *slot;

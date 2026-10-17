@@ -17,7 +17,14 @@ effect on this tick's control, and sends:
   Kevin was in range of it, saw it (in his view, with a line of sight) or
   did it;
 - `applied` for each command on the tick it took effect, and
-  `action_result` for each command refused.
+  `action_result` for each command refused;
+- while the sidecar asks to hear you (`hearing`), `ptt` as the push to
+  talk key (controls.push_to_talk) goes down and up, and between, what the
+  microphone hears (kind 2: 16 kHz), from a little before the press;
+- `voice` as Kevin's voice starts and stops playing.
+
+Kevin's voice comes as kind 3 messages (48 kHz), queued and played
+through voice chat's mixer (voice_audio.c); a new line cuts off the last.
 
 The sidecar's commands lay an overlay on the AI's control of Kevin
 (`press`, `hold`, `fire_mode`, `aim_at`); the AI keeps running beneath,
@@ -49,6 +56,7 @@ with a reason, never applied in part.
 #include "kevin_bot.h"
 #include "kevin_bridge.h"
 #include "kevin_view.h"
+#include "../src/voice_audio.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -59,6 +67,9 @@ int config_boolean(const char *name);
 long config_integer(const char *name);
 
 unsigned long system_milliseconds(void);
+/* xinput_sdl.c's; console.c's */
+int halo_push_to_talk_held(void);
+boolean console_is_active(void);
 
 /* ---------- constants */
 
@@ -70,6 +81,11 @@ enum
 	_kevin_transport_type_tcp = 0x12,
 
 	_kevin_message_json = 1,
+	/* what the microphone hears: the utterance, the frame's sequence in
+	it (both 4 bytes, little endian), then 16-bit samples at 16 kHz */
+	_kevin_message_hearing = 2,
+	/* Kevin's voice: his line (4 bytes), then 16-bit samples at 48 kHz */
+	_kevin_message_voice = 3,
 
 	/* a message's header: its length and its kind */
 	KEVIN_HEADER_SIZE = 5,
@@ -93,6 +109,16 @@ enum
 	KEVIN_MAXIMUM_TYPE_LENGTH = 32,
 	KEVIN_MAXIMUM_PENDING = 8,
 	KEVIN_MAXIMUM_NEARBY_UNITS = 12,
+
+	/* hearing: a frame of 20 ms at 16 kHz (a third of the microphone's
+	48 kHz), and the frames kept from before the press */
+	KEVIN_HEARING_FRAME_SAMPLES = VOICE_FRAME_SAMPLES / 3,
+	KEVIN_HEARING_PREROLL_FRAMES = 15,
+	/* Kevin's voice: his number to the mixer (machines' are below 16), the
+	samples queued at most (10 seconds), and those kept in the mixer */
+	KEVIN_VOICE_SPEAKER = 1000,
+	KEVIN_VOICE_QUEUE_SAMPLES = 10 * 48000,
+	KEVIN_VOICE_MIXER_SAMPLES = 48000 / 5,
 
 	/* the longest press or aim (ticks) */
 	KEVIN_MAXIMUM_PRESS_TICKS = 300,
@@ -199,6 +225,24 @@ static struct
 	/* commands waiting for the tick they take effect */
 	long pending_ids[KEVIN_MAXIMUM_PENDING];
 	long pending_count;
+
+	/* hearing you */
+	boolean hearing;
+	boolean microphone_open;
+	boolean talking;
+	long utterance;
+	long hearing_sequence;
+	short preroll[KEVIN_HEARING_PREROLL_FRAMES][KEVIN_HEARING_FRAME_SAMPLES];
+	long preroll_count;
+	long preroll_next;
+
+	/* Kevin's voice */
+	short voice[KEVIN_VOICE_QUEUE_SAMPLES];
+	long voice_read;
+	long voice_count;
+	long voice_line;
+	boolean voice_playing;
+	boolean voice_overflowed;
 
 	/* what is watched for events */
 	long kevin_unit_index;
@@ -573,10 +617,11 @@ static void kevin_bridge_flush(
 	return;
 }
 
-/* queues one JSON message; a sidecar so far behind that it doesn't fit is
-not reading, and is let go */
-static void kevin_bridge_send_json(
-	char const *json,
+/* queues one message of a kind; a sidecar so far behind that it doesn't
+fit is not reading, and is let go */
+static void kevin_bridge_send(
+	byte kind,
+	void const *payload,
 	long length)
 {
 	byte *header;
@@ -593,9 +638,18 @@ static void kevin_bridge_send_json(
 	header[1] = (byte)(((length + 1) >> 8) & 0xFF);
 	header[2] = (byte)(((length + 1) >> 16) & 0xFF);
 	header[3] = (byte)(((length + 1) >> 24) & 0xFF);
-	header[4] = _kevin_message_json;
-	memcpy(header + KEVIN_HEADER_SIZE, json, (size_t)length);
+	header[4] = kind;
+	memcpy(header + KEVIN_HEADER_SIZE, payload, (size_t)length);
 	kevin_bridge_globals.sending += KEVIN_HEADER_SIZE + length;
+
+	return;
+}
+
+static void kevin_bridge_send_json(
+	char const *json,
+	long length)
+{
+	kevin_bridge_send(_kevin_message_json, json, length);
 
 	return;
 }
@@ -762,6 +816,209 @@ static boolean kevin_bridge_ticks(
 	return TRUE;
 }
 
+/* ---------- private code: Kevin's voice */
+
+static void kevin_bridge_voice_stop(
+	void)
+{
+	kevin_bridge_globals.voice_read = 0;
+	kevin_bridge_globals.voice_count = 0;
+	voice_audio_forget(KEVIN_VOICE_SPEAKER);
+
+	return;
+}
+
+/* a kind 3 message: samples of a line queued; a new line cuts off the last */
+static void kevin_bridge_voice_message(
+	byte const *payload,
+	long length)
+{
+	long line;
+	long count;
+	long index;
+
+	if (length < 4 || ((length - 4) & 1))
+	{
+		kevin_bridge_send_result(NONE, FALSE, "voice is a line number and 16-bit samples");
+		return;
+	}
+	line = (long)((unsigned long)payload[0] | ((unsigned long)payload[1] << 8) |
+		((unsigned long)payload[2] << 16) | ((unsigned long)payload[3] << 24));
+	if (line != kevin_bridge_globals.voice_line)
+	{
+		kevin_bridge_voice_stop();
+		kevin_bridge_globals.voice_line = line;
+		kevin_bridge_globals.voice_overflowed = FALSE;
+	}
+	count = (length - 4) / 2;
+	for (index = 0; index < count; index++)
+	{
+		byte const *sample = payload + 4 + 2 * index;
+
+		if (kevin_bridge_globals.voice_count >= KEVIN_VOICE_QUEUE_SAMPLES)
+		{
+			if (!kevin_bridge_globals.voice_overflowed)
+				error(_error_silent, "kevin bridge: Kevin's line %ld is longer than his queue", line);
+			kevin_bridge_globals.voice_overflowed = TRUE;
+			break;
+		}
+		kevin_bridge_globals.voice[(kevin_bridge_globals.voice_read + kevin_bridge_globals.voice_count) %
+			KEVIN_VOICE_QUEUE_SAMPLES] = (short)((unsigned short)sample[0] | ((unsigned short)sample[1] << 8));
+		kevin_bridge_globals.voice_count++;
+	}
+
+	return;
+}
+
+/* the queue into the mixer, a little ahead of it; `voice` as he starts
+and stops */
+static void kevin_bridge_speak(
+	void)
+{
+	boolean playing;
+
+	while (kevin_bridge_globals.voice_count > 0 &&
+		voice_audio_buffered(KEVIN_VOICE_SPEAKER) < KEVIN_VOICE_MIXER_SAMPLES)
+	{
+		float samples[VOICE_FRAME_SAMPLES];
+		long count = MIN(kevin_bridge_globals.voice_count, VOICE_FRAME_SAMPLES);
+		long index;
+
+		for (index = 0; index < count; index++)
+		{
+			samples[index] = (float)kevin_bridge_globals.voice[kevin_bridge_globals.voice_read] / 32768.f;
+			kevin_bridge_globals.voice_read = (kevin_bridge_globals.voice_read + 1) % KEVIN_VOICE_QUEUE_SAMPLES;
+		}
+		kevin_bridge_globals.voice_count -= count;
+		voice_audio_play_samples(KEVIN_VOICE_SPEAKER, samples, (int)count, 1.f, 0.f);
+	}
+	playing = kevin_bridge_globals.voice_count > 0 || voice_audio_speaking(KEVIN_VOICE_SPEAKER);
+	if (playing != kevin_bridge_globals.voice_playing)
+	{
+		char message[128];
+		long length = 0;
+
+		kevin_bridge_globals.voice_playing = playing;
+		kevin_bridge_append(message, sizeof(message), &length,
+			"{\"type\":\"voice\",\"line\":%ld,\"playing\":%s,\"tick\":%ld,\"ms\":%lu}",
+			kevin_bridge_globals.voice_line, playing ? "true" : "false", game_time_get(), system_milliseconds());
+		kevin_bridge_send_json(message, length);
+	}
+
+	return;
+}
+
+/* ---------- private code: hearing you */
+
+static void kevin_bridge_send_ptt(
+	boolean down)
+{
+	char message[128];
+	long length = 0;
+
+	kevin_bridge_append(message, sizeof(message), &length,
+		"{\"type\":\"ptt\",\"down\":%s,\"utterance\":%ld,\"tick\":%ld,\"ms\":%lu}",
+		down ? "true" : "false", kevin_bridge_globals.utterance, game_time_get(), system_milliseconds());
+	kevin_bridge_send_json(message, length);
+
+	return;
+}
+
+static void kevin_bridge_send_hearing(
+	short const *samples)
+{
+	byte message[8 + 2 * KEVIN_HEARING_FRAME_SAMPLES];
+	unsigned long utterance = (unsigned long)kevin_bridge_globals.utterance;
+	unsigned long sequence = (unsigned long)kevin_bridge_globals.hearing_sequence++;
+	long index;
+
+	for (index = 0; index < 4; index++)
+	{
+		message[index] = (byte)((utterance >> (8 * index)) & 0xFF);
+		message[4 + index] = (byte)((sequence >> (8 * index)) & 0xFF);
+	}
+	for (index = 0; index < KEVIN_HEARING_FRAME_SAMPLES; index++)
+	{
+		message[8 + 2 * index] = (byte)((unsigned short)samples[index] & 0xFF);
+		message[9 + 2 * index] = (byte)(((unsigned short)samples[index] >> 8) & 0xFF);
+	}
+	kevin_bridge_send(_kevin_message_hearing, message, sizeof(message));
+
+	return;
+}
+
+/* the microphone open while the sidecar listens; what it hears sent while
+the push to talk key is held, from the frames kept before the press */
+static void kevin_bridge_hear(
+	void)
+{
+	float frame[VOICE_FRAME_SAMPLES];
+	boolean held;
+
+	if (!kevin_bridge_globals.client || !kevin_bridge_globals.hearing)
+	{
+		if (kevin_bridge_globals.microphone_open)
+			voice_audio_microphone(FALSE);
+		kevin_bridge_globals.microphone_open = FALSE;
+		if (kevin_bridge_globals.talking)
+			kevin_bridge_send_ptt(FALSE);
+		kevin_bridge_globals.talking = FALSE;
+		kevin_bridge_globals.preroll_count = 0;
+		return;
+	}
+	voice_audio_microphone(TRUE);
+	kevin_bridge_globals.microphone_open = TRUE;
+	held = halo_push_to_talk_held() && !console_is_active();
+	if (held && !kevin_bridge_globals.talking)
+	{
+		long index;
+
+		kevin_bridge_globals.talking = TRUE;
+		kevin_bridge_globals.utterance++;
+		kevin_bridge_globals.hearing_sequence = 0;
+		kevin_bridge_send_ptt(TRUE);
+		for (index = 0; index < kevin_bridge_globals.preroll_count; index++)
+		{
+			long oldest = (kevin_bridge_globals.preroll_next - kevin_bridge_globals.preroll_count + index +
+				KEVIN_HEARING_PREROLL_FRAMES) % KEVIN_HEARING_PREROLL_FRAMES;
+
+			kevin_bridge_send_hearing(kevin_bridge_globals.preroll[oldest]);
+		}
+		kevin_bridge_globals.preroll_count = 0;
+	}
+	while (voice_audio_read_frame(frame))
+	{
+		short samples[KEVIN_HEARING_FRAME_SAMPLES];
+		long index;
+
+		/* (48 kHz to 16, three samples averaged) */
+		for (index = 0; index < KEVIN_HEARING_FRAME_SAMPLES; index++)
+		{
+			real sample = (frame[3 * index] + frame[3 * index + 1] + frame[3 * index + 2]) * (32767.f / 3.f);
+
+			samples[index] = (short)PIN(sample, -32768.f, 32767.f);
+		}
+		if (kevin_bridge_globals.talking)
+		{
+			kevin_bridge_send_hearing(samples);
+		}
+		else
+		{
+			csmemcpy(kevin_bridge_globals.preroll[kevin_bridge_globals.preroll_next], samples, sizeof(samples));
+			kevin_bridge_globals.preroll_next = (kevin_bridge_globals.preroll_next + 1) % KEVIN_HEARING_PREROLL_FRAMES;
+			if (kevin_bridge_globals.preroll_count < KEVIN_HEARING_PREROLL_FRAMES)
+				kevin_bridge_globals.preroll_count++;
+		}
+	}
+	if (!held && kevin_bridge_globals.talking)
+	{
+		kevin_bridge_globals.talking = FALSE;
+		kevin_bridge_send_ptt(FALSE);
+	}
+
+	return;
+}
+
 /* ---------- private code: commands */
 
 static void kevin_bridge_command(
@@ -846,6 +1103,26 @@ static void kevin_bridge_command(
 		}
 		kevin_bridge_globals.urgent_count = count;
 		kevin_bridge_send_result(id, TRUE, "urgent types set");
+		return;
+	}
+	if (!strcmp(type, "hearing"))
+	{
+		boolean on = TRUE;
+
+		token_index = kevin_json_find(&json, 0, "on");
+		if (token_index != NONE && !kevin_json_get_boolean(&json, token_index, &on))
+		{
+			kevin_bridge_send_result(id, FALSE, "on is not true or false");
+			return;
+		}
+		kevin_bridge_globals.hearing = on;
+		kevin_bridge_send_result(id, TRUE, on ? "hearing" : "not hearing");
+		return;
+	}
+	if (!strcmp(type, "voice_stop"))
+	{
+		kevin_bridge_voice_stop();
+		kevin_bridge_send_result(id, TRUE, "voice stopped");
 		return;
 	}
 	if (!strcmp(type, "request_view"))
@@ -990,6 +1267,8 @@ static void kevin_bridge_disconnect(
 		error(_error_silent, "kevin bridge: the sidecar is gone (%s)", why);
 	}
 	kevin_bridge_release("the sidecar is gone");
+	kevin_bridge_globals.hearing = FALSE;
+	kevin_bridge_voice_stop();
 
 	return;
 }
@@ -1133,6 +1412,8 @@ static void kevin_bridge_receive(
 		kevin_bridge_globals.silent = FALSE;
 		if (header[4] == _kevin_message_json)
 			kevin_bridge_command((char const *)header + KEVIN_HEADER_SIZE, (long)length - 1);
+		else if (header[4] == _kevin_message_voice)
+			kevin_bridge_voice_message(header + KEVIN_HEADER_SIZE, (long)length - 1);
 		else
 			kevin_bridge_send_result(NONE, FALSE, "unknown message kind");
 		offset += 4 + (long)length;
@@ -1438,6 +1719,8 @@ void kevin_bridge_update(
 		kevin_bridge_release("the sidecar is silent");
 	}
 
+	kevin_bridge_hear();
+	kevin_bridge_speak();
 	kevin_bridge_watch();
 	if (++kevin_bridge_globals.event_ticks >= KEVIN_EVENT_TICKS)
 		kevin_bridge_flush_events();

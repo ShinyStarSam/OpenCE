@@ -31,6 +31,11 @@ int voice_audio_encode(const float *frame, int bitrate, unsigned char *packet, i
 gain (1: as spoken) and pan (-1 left to 1 right) */
 void voice_audio_play(int speaker, unsigned short sequence, const unsigned char *packet, int length, float gain,
 	float pan);
+/* samples (48 kHz, mono) a speaker says, already decoded, to play at the
+gain and pan: Kevin's voice (port/linux/game/kevin_bridge.c) */
+void voice_audio_play_samples(int speaker, const float *samples, int count, float gain, float pan);
+/* the samples of a speaker's waiting to be mixed */
+int voice_audio_buffered(int speaker);
 /* a speaker no longer heard: their buffer and decoder freed; or all */
 void voice_audio_forget(int speaker);
 void voice_audio_forget_all(void);

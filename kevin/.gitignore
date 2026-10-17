@@ -1,4 +1,7 @@
 models/
 # S0 measurements and recordings (Breeze outputs fall under its non-commercial licence)
 tools/s0/out/
+# the sidecar's barks and test speech (made by tools/make_barks.py and tools/m2_reflex_test.py), and its logs
+sidecar/data/
+sidecar/logs/
 __pycache__/

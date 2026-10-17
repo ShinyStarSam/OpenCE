@@ -368,10 +368,17 @@ Game → sidecar:
   `grenade_near`, `player_damaged`, `player_died`, `player_shot_kevin`,
   `dialogue` (speaker + sound tag name), `checkpoint`,
   `checkpoint_revert`, `level_loaded`, `objective_changed`,
-  `cinematic_start`, `cinematic_end`, `stuck`, `teleported`, `ptt_down`,
-  `ptt_up`, `console` (text after `kevin`), `reflex_fired` (a tier-0
+  `cinematic_start`, `cinematic_end`, `stuck`, `teleported`,
+  `console` (text after `kevin`), `reflex_fired` (a tier-0
   rule acted), `action_result`, `applied` (the tick a command took
   effect, for measuring).
+- While the sidecar asks to hear (`hearing`): `ptt` {down, utterance} at
+  once as the push to talk key goes down and up, and between, what the
+  game's microphone hears (kind 2: the utterance and frame numbers, then
+  16-bit samples at 16 kHz, 20 ms a frame), starting 300 ms before the
+  press so the first word isn't clipped.
+- `voice` {line, playing} as Kevin's voice starts and stops (handed to the
+  mixer).
 - `view` replies: which POV, the JPEG, the labels.
 - `snapshot`, at each checkpoint: your health, shield, weapons and ammo,
   grenades, the level and objective, deaths so far. The data behind the
@@ -396,8 +403,11 @@ Sidecar → game:
   C. Only functions on the bridge's allowed list are run, and only from
   the local socket: whatever another process sends is untrusted.
 - `urgent` {event types}: which events are sent at once (below)
-- `voice` (20 ms Opus frames at 48 kHz), `voice_end`, `voice_cut` (stop
-  at once, e.g. when you shout "shut up")
+- Kevin's voice (kind 3: his line's number, then 16-bit samples at
+  48 kHz; plain samples, since the socket is local), up to 10 s queued, a
+  new line cutting off the last; `voice_stop` (stop at once: barge-in, or
+  "shut up")
+- `hearing` {on}: the game's microphone open, for push to talk
 - `subtitle` {text, duration}: Kevin's line on screen
 - `gesture` {name}: a gesture animation while he talks
 
@@ -424,8 +434,9 @@ From the chasm FNV bridge's event log, cut down to one witness:
 
 ### Voice and hearing
 
-- **Kevin's voice:** barks and brain lines go out as Opus frames; the
-  bridge plays them through `voice_audio_play` with gain and pan from
+- **Kevin's voice:** barks and brain lines go out as 48 kHz samples;
+  the bridge plays them through voice chat's mixer (`voice_audio.c`) with
+  gain and pan from
   Kevin's position relative to the camera. As the FNV bridge plays its
   NPCs' lines: one stream per line, silence where a frame is late rather
   than a stutter, frames of an old line dropped, and a line that never
@@ -589,7 +600,7 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 | S0 | **Model check:** download and verify every model and its licence; time each alone and all together with Halo running; check whether the maps' dialogue sounds have subtitle data. **Done:** see "Hardware budget" | A table of load size, latency and VRAM per model; a go / no-go for each |
 | M0 | **Done.** Kevin as an AI-driven Spartan (`kevin_bot.c`): made behind you, made again after he dies, following, look and aim, combat and weapon choice, brought back when stuck; his view drawn off screen on request (`kevin_view.c`). (A first version made him co-op player 2; see "Kevin is a Spartan") | Kevin, armed, follows you through the a30 opening while you play, gets into the Warthog's gun seat, comes back after dying; frames of his view arrive with no cost to yours |
 | M1 | **Done.** `kevin_bridge.c`: settings, socket read every tick, framing, `state`, events with `kevin_in_range` / `kevin_saw` / `kevin_did`, batches and `urgent` types, checkpoint ids, the control overlay hook, `applied` timestamps and `action_result`, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI (met: `applied` on the next tick, p50 16 ms, p95 32 ms over 20 tries at 60 fps; silence and a closed socket both hand him back; `kevin/tools/m1_bridge_test.py`) |
-| M2 | **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries |
+| M2 | **Done.** **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries (met: in the game at 60 fps, jump p50 62 ms, p95 149 ms after speech ends; the bark the same; 20 of 20 commands right, questions and "don't" left alone; `kevin/tools/m2_reflex_test.py`, speech from Windows' voices given to the hearing, so the microphone's own delay of about a tick isn't counted) |
 | M3 | Kevin across level loads, BSP switches and checkpoint reverts (made again or moved to the new BSP's encounter), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
 | M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
 | M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
@@ -611,9 +622,11 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
   marines do, before tier 0's own betrayal rule; tier 0 should decide.
 - **Weapon spread at 100 accuracy:** where the weapon's own error is
   applied to a shot, so it can be zeroed for Kevin alone (M4).
-- **Parakeet partials:** it's fast enough (S0); are its partial results
-  stable enough for tier 1, or does tier 1 need a keyword-spotting model
-  on raw audio? (M2)
+- **Parakeet partials:** answered in M2: stable enough for tier 1 on the
+  test set, with passes back to back (heard to decided p50 86 ms, p95
+  110 ms). The one partial that misled was "don't jump" heard as "don't
+  shoot", so a phrase that is a negation waits for the final transcript.
+  To check with real voices and a noisy room.
 - **Reflex model accuracy:** Kev-0.8B is fast enough (S0) but untrained;
   how many of Kevin's own examples it needs to be reliable (M5).
 - **Memory in later levels:** the loadout leaves about 1 GB below the

@@ -10,6 +10,11 @@ game saves a checkpoint or reverts to one. It sends what the game sends
 once, `applied`, `action_result`, `pong`) and checks what it's sent the
 same way, refusing with the same reasons.
 
+Its microphone is what a test gives `say()`: while the sidecar asks to hear
+(`hearing`), it's sent as the game sends it (`ptt` down, kind 2 frames, `ptt`
+up). Kevin's voice (kind 3) is "played" in real time, with `voice` as it
+starts and stops.
+
     python kevin/sidecar/fakegame/fakegame.py [--port 2325] [--seed 1]
 """
 
@@ -20,7 +25,9 @@ import os
 import random
 import select
 import socket
+import struct
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -43,6 +50,8 @@ NEARBY_DISTANCE = 30.0
 WITNESS_DISTANCE = 40.0
 WITNESS_COSINE = 0.5
 RESPAWN_TICKS = 10 * TICKS_PER_SECOND
+HEARING_FRAME_BYTES = 2 * 320          # 20 ms at 16 kHz
+VOICE_QUEUE_SAMPLES = 10 * 48000
 
 FLAGS = ("crouch", "jump", "flashlight", "action", "reload", "fire", "fire_secondary", "grenade", "swap_weapons")
 
@@ -113,6 +122,18 @@ class FakeGame:
         self.saved = None
         # ticks since the last revert (the game time itself goes back in one)
         self.revert_counter = 0
+
+        # hearing: what say() was given, sent a frame each 20 ms
+        self.hearing = False
+        self.speech_lock = threading.Lock()
+        self.speeches = []
+        self.speech = None             # [frames, next frame, started]
+        self.utterance = 0
+        self.hearing_sequence = 0
+        # Kevin's voice: samples waiting, and his line
+        self.voice_samples = 0
+        self.voice_line = 0
+        self.voice_playing = False
 
         self.you = Unit(YOUR_ID, "cyborg", 1, (20.0, 0.0, 0.0), "pistol", 12)
         self.kevin = None
@@ -254,6 +275,17 @@ class FakeGame:
         if kind == "request_view":
             self.result(command_id, True, "view asked for")
             return
+        if kind == "hearing":
+            on = message.get("on", True)
+            if not isinstance(on, bool):
+                raise Refused(command_id, "on is not true or false")
+            self.hearing = on
+            self.result(command_id, True, "hearing" if on else "not hearing")
+            return
+        if kind == "voice_stop":
+            self.voice_samples = 0
+            self.result(command_id, True, "voice stopped")
+            return
 
         if not self.kevin or not self.kevin.alive:
             raise Refused(command_id, "no Kevin")
@@ -325,6 +357,73 @@ class FakeGame:
         self.client = None
         self.sending = b""
         self.release_overlay("the sidecar is gone")
+        self.hearing = False
+        self.voice_samples = 0
+
+    # ---- hearing and Kevin's voice
+
+    def say(self, samples, hold_seconds=0.3):
+        """Has the microphone hear samples (16-bit, 16 kHz, bytes) with push to
+        talk held, and held hold_seconds more; the time (monotonic) the push
+        to talk goes down is returned through the list given back, once it does."""
+        samples = samples + bytes(2 * int(16000 * hold_seconds))
+        frames = [samples[index:index + HEARING_FRAME_BYTES].ljust(HEARING_FRAME_BYTES, b"\0")
+                  for index in range(0, len(samples), HEARING_FRAME_BYTES)]
+        started = []
+        with self.speech_lock:
+            self.speeches.append((frames, started))
+        return started
+
+    def hear(self):
+        if self.speech is None:
+            with self.speech_lock:
+                if not self.speeches or not self.hearing or not self.client:
+                    return
+                frames, started = self.speeches.pop(0)
+            self.utterance += 1
+            self.hearing_sequence = 0
+            now = time.monotonic()
+            self.speech = [frames, 0, now]
+            started.append(now)
+            self.send({"type": "ptt", "down": True, "utterance": self.utterance, "tick": self.tick,
+                       "ms": int(now * 1000)})
+        frames, next_frame, started = self.speech
+        due = min(len(frames), int((time.monotonic() - started) / 0.02) + 1)
+        while next_frame < due:
+            self.send_raw(protocol.frame_hearing(self.utterance, self.hearing_sequence, frames[next_frame]))
+            self.hearing_sequence += 1
+            next_frame += 1
+        self.speech[1] = next_frame
+        if next_frame >= len(frames):
+            self.speech = None
+            self.send({"type": "ptt", "down": False, "utterance": self.utterance, "tick": self.tick,
+                       "ms": int(time.monotonic() * 1000)})
+
+    def voice_message(self, payload):
+        if len(payload) < 4 or (len(payload) - 4) % 2:
+            self.result(-1, False, "voice is a line number and 16-bit samples")
+            return
+        (line,) = struct.unpack_from("<I", payload)
+        if line != self.voice_line:
+            self.voice_line = line
+            self.voice_samples = 0
+        self.voice_samples = min(VOICE_QUEUE_SAMPLES, self.voice_samples + (len(payload) - 4) // 2)
+
+    def speak(self):
+        playing = self.voice_samples > 0
+        self.voice_samples = max(0, self.voice_samples - 48000 // TICKS_PER_SECOND)
+        if playing != self.voice_playing:
+            self.voice_playing = playing
+            self.send({"type": "voice", "line": self.voice_line, "playing": playing, "tick": self.tick,
+                       "ms": int(time.monotonic() * 1000)})
+
+    def send_raw(self, data):
+        if not self.client:
+            return
+        if len(self.sending) + len(data) > SEND_LIMIT:
+            self.disconnect("not reading")
+            return
+        self.sending += data
 
     def accept(self):
         readable, _, _ = select.select([self.listener], [], [], 0)
@@ -364,6 +463,9 @@ class FakeGame:
             for kind, payload in self.reader.messages():
                 self.last_message = time.monotonic()
                 self.silent = False
+                if kind == protocol.KIND_VOICE:
+                    self.voice_message(payload)
+                    continue
                 if kind != protocol.KIND_JSON:
                     self.result(-1, False, "unknown message kind")
                     continue
@@ -493,6 +595,8 @@ class FakeGame:
         if self.client and not self.silent and time.monotonic() - self.last_message > SILENT_SECONDS:
             self.silent = True
             self.release_overlay("the sidecar is silent")
+        self.hear()
+        self.speak()
         self.simulate()
         self.checkpoints()
         self.event_ticks += 1
