@@ -189,24 +189,61 @@ Tier 0 rules run in the same hook, from state the bridge already has
 (recent damage sources, your stance, nearby grenades), with parameters
 the sidecar sets.
 
-### Kevin is a Spartan
+### Kevin is a Spartan: co-op player 2, driven by the engine's AI
 
-- Spawn: `object_create` the player's own biped tag
-  (`player_information[0].player_unit`) beside you, give him the assault
-  rifle and pistol, then `ai_attach_free` with a marine actor variant from
-  the current map. Same team as you.
-- He has the Spartan's shields, health, speed and jump. To tell you apart,
-  use a different armour colour (the multiplayer colour change on the
-  cyborg's shader), once that's checked.
-- Respawn after death near you, out of sight (as co-op does), and again
-  after level loads and checkpoint reverts.
-- Risk: the cyborg's animation graph was made for a player, not an AI.
-  Behaviours that ask for missing animations (dives, signals, surprise)
-  may do nothing or look wrong. M0 checks this first. If it's bad, turn
-  those behaviours off in the variant or map them to the animations the
-  cyborg has.
-- The actor variant sets reaction times and accuracy; see "Combat
-  tuning".
+Kevin is the second player of a local co-op game, with no controller.
+The engine's own AI drives his unit, and the bridge's overlay sits on top.
+
+Why a player and not a spawned biped (found in M0's first try): a30's
+only Spartan placement is the cutscene puppet `chief`, which is the
+unarmed biped (`characters\cyborg\cyborg_unarmed`). The console can give
+it the AI and it follows you with normal animations, but it can't hold a
+weapon, and the console has no way to create a biped from a tag. As
+player 2 he is a real armed Spartan, and co-op gives him for free:
+
+- the player's biped, weapons, grenades, melee, flashlight, every vehicle
+  seat including the driver's, and the same physics as you;
+- respawning near you when he dies (`players_respawn_network_coop`,
+  `players_coop_spawn_location`), and the levels' own handling of player
+  2 in cutscenes and teleports (a30 has `player1_bridge_base` and
+  similar flags);
+- his own armour colour (`players_coop_color_unit`);
+- a second view of the world: split screen at first, later rendered off
+  screen as **Kevin's POV** (M10).
+
+How the AI drives a player's unit. Each tick `ai_update` runs before
+`players_update_before_game` (`source/game/game.c:362-365`), so player
+input overwrites the AI's control. The engine already lets an actor drive
+a player's unit, but only while player input is disabled
+(`actor_unit_control`, `source/ai/actors.c:4170`), which is how cutscenes
+move you. `actor_create_for_unit` accepts any living biped, a player's
+included (`actors.c:2523`). Two `port:` hooks make that true for Kevin's
+player alone:
+
+1. `actor_unit_control` also drives the unit when its player is Kevin.
+2. `players_update_before_game` skips Kevin's player input, and doesn't
+   write the "inhibited" control either, when his unit has an actor.
+
+Starting a game: `player_spawn_count` (`source/main/main.c:708`, also a
+script global) set to 2 makes `create_local_players` make two players.
+With `kevin.enabled`, a campaign started from the menus or `map_name`
+gets player 2 as Kevin, with no profile choice and no controller.
+
+The actor: the bridge attaches the current map's marine variant to
+Kevin's unit each time he spawns, in an encounter it owns, so follow
+orders (`follow_target_unit` = your unit) and command lists can be given
+to him. The level scripts never touch it.
+
+What stays to check (M0): whether the AI treats a player's unit
+differently anywhere that matters (`actor_perception.c:1730`,
+`actor_stimulus.c:993`, `ai.c:888`, `ai_communication.c:3789`; the
+marines' "follow the players" also follows Kevin); whether co-op's extra
+enemies apply to local co-op (`network.coop_enemies`; Kevin shouldn't
+make the levels harder); and checkpoints, which in co-op wait for both
+players to be safe. A co-op game can't continue a single-player save, so
+a playthrough with Kevin starts each level as co-op.
+
+The actor variant sets reaction times and accuracy; see "Combat tuning".
 
 ### Combat tuning: from useless to solo-the-game
 
@@ -244,10 +281,14 @@ limits you set.
 - **Catch-up teleport:** when he's far behind (or stuck) and neither of
   you can see the spot, he's teleported to a safe point near you
   (`teleported` event), as co-op respawns do.
-- **Scripted moves:** level scripts that teleport you, drop you from a
-  Pelican or change BSP bring Kevin along on the next safe tick.
-- **Cutscenes:** `cinematic_start` / `cinematic_end` events. Kevin is
-  hidden or frozen during the cutscene and placed beside you afterwards.
+- **Scripted moves:** as player 2, Kevin is moved by the levels' own co-op
+  handling where it exists (teleports of `player1`, BSP switches, co-op
+  respawns). Where a level moves only player 1, the bridge brings Kevin
+  along on the next safe tick.
+- **Cutscenes:** `cinematic_start` / `cinematic_end` events. Co-op's
+  own handling of player 2 in cutscenes comes first (to check in M0);
+  where it leaves Kevin behind, the bridge places him beside you after
+  the cutscene.
   He stays quiet, receives the cutscene's dialogue as context, and can
   comment once it's over.
 
@@ -424,10 +465,10 @@ conversations; in a firefight it would be far too slow.
 | --- | --- | --- |
 | P0 | Fork OpenCE on GitHub; game-side changes on a `kevin` branch; `kevin/` tracked. **Done** | Upstream merges cleanly into the branch |
 | S0 | **Model check:** download and verify every model and its licence; time each alone and all together with Halo running; check whether the maps' dialogue sounds have subtitle data. **Done:** see "Hardware budget" | A table of load size, latency and VRAM per model; a go / no-go for each |
-| M0 | Prototype over the telnet console, no C changes: spawn a Spartan Kevin on a30, follow, the map's own command lists, enter a vehicle. Settles the animation risk | Manual, on a30 |
+| M0 | **Console part (done):** a30's `chief` puppet given the AI follows you with normal animations, but it's the unarmed biped. **Co-op proof, no C:** `player_spawn_count` 2, `map_name a30`, attach the AI to player 2's unit, and disable player input (which the engine needs before an actor may drive a player's unit). **C prototype:** `kevin.enabled` makes player 2 Kevin, the two hooks above, the actor attached on every spawn in an encounter of the bridge's own, follow you | Kevin, armed, follows you through the a30 opening while you play, gets into the Warthog's gun seat, respawns after dying; split screen shows his view |
 | M1 | `kevin_bridge.c`: settings, socket read every tick, framing, `state` and pushed events, the control overlay hook, `applied` timestamps, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI |
 | M2 | **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries |
-| M3 | Spawn / respawn as a Spartan, generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
+| M3 | Kevin's player across level loads and checkpoint reverts (actor re-attached each spawn), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
 | M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
 | M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
 | M6 | Keeping up: stuck detection, catch-up teleport, scripted moves, cutscene events | Kevin is beside you after every cutscene and Pelican drop through a30 and a50 |
@@ -441,7 +482,11 @@ conversations; in a firefight it would be far too slow.
 
 ## Open questions
 
-- **Spartan animations under AI** (M0).
+- **The AI on a player's unit** (M0): the places the AI treats players
+  differently, co-op's extra enemies, co-op checkpoints.
+- **An encounter of the bridge's own** (M0): whether one can be added at
+  map load like the command lists, or Kevin borrows a quiet friendly
+  encounter of the map at first.
 - **Weapon spread at 100 accuracy:** where the weapon's own error is
   applied to a shot, so it can be zeroed for Kevin alone (M4).
 - **Parakeet partials:** it's fast enough (S0); are its partial results
