@@ -36,7 +36,7 @@ path of an action that a faster tier can take.
 | --- | --- | --- | --- |
 | **0: spinal** | In the game, `kevin_bridge.c`, every tick | Rules set by the sidecar, run with no round trip: hostile after you shoot him twice within 3 s; crouch when you crouch in stealth mode; dive from a grenade within 3 units; hold-fire mask. The engine's own AI already handles cover, dodging and returning fire | Same tick |
 | **1: keyword** | Sidecar, on every *partial* STT result | A small grammar of imperatives: "jump", "crouch / get down", "stand up", "hold fire", "fire / go loud", "follow me", "wait / stay", "get in", "get out", "reload", "grenade", and the corrections "stop", "cancel", "no, the other one", which cancel the current task at once. Fuzzy-matched and fired as soon as the word appears, before the sentence ends | < 5 ms after STT |
-| **2: classifier** | Sidecar, reflex model (Kev-4B, or our own small classifier) | Utterance + state + crosshair hints → one action with arguments ("stand by that rock" → `move_to` object 0x1F2A). Short cached prompt prefix, output constrained to the action schema, at most ~16 tokens | ≤ 100 ms |
+| **2: classifier** | Sidecar, reflex model (Kev-0.8B, trained on Kevin's commands) | Utterance + state + crosshair hints → one action with arguments ("stand by that rock" → `move_to` object 0x1F2A). Short cached prompt prefix, output constrained to the action schema, at most ~16 tokens | ≤ 100 ms (S0: ~45 ms) |
 | **3: brain** | Sidecar, Gemma 12B | Conversation, opinions, plans, questions, refusals, mood. Sets Kevin's **policy**, which tiers 0–2 read without waiting | Streams; first sentence ≤ ~800 ms |
 
 How this keeps the video's free will without slowing reflexes down:
@@ -57,8 +57,9 @@ Speech is slow to generate, so short lines are made ahead of time.
 - A **bark cache**: several variants per category (`ack`, `refuse`,
   `contact`, `shields_low`, `reloading`, `grenade`, `kill`, `hurt`,
   `revive`, `vehicle_in`, `man_down`…), each rendered in normal, whisper
-  and radio styles. They're generated with Breeze TTS at startup and kept
-  in RAM, so they play in under 50 ms.
+  and radio styles. They're generated with Breeze TTS's batch endpoint
+  (many lines per request, much faster than one by one), saved to disk,
+  and kept in RAM, so they play in under 50 ms.
 - The brain rewrites the cache in the background when Kevin's persona
   changes (the console "you're a cat now" gets cat barks within seconds),
   or just to keep lines from repeating.
@@ -91,17 +92,32 @@ lets him start a conversation himself.
 
 ### Keeping the GPU from getting in the way
 
-All the models share one RTX 3090, and a long brain generation must not
-delay a reflex.
+All the models share one RTX 3090 with the game, and a long brain
+generation must not delay a reflex or make Kevin's voice stutter. S0
+measured what that takes (see "Hardware budget").
 
-- STT and the reflex model run in their own process and stay loaded. The
-  brain runs in a separate llama.cpp/Ollama server.
+- Every model stays loaded in its own server: Parakeet, Kev and Breeze in
+  WSL, the brain in Ollama on Windows.
 - While a tier-1/2 decision or STT chunk is pending, brain generation
   pauses between tokens (the sidecar stops pulling from the stream).
+- **Background brain work waits while Kevin speaks.** Breeze makes speech
+  at 0.6–0.7× real time next to the game, but at about 1.5× (too slow)
+  while the brain generates nonstop. Summaries, the diary and profile
+  updates run only between Kevin's lines; his own replies are short
+  enough not to matter.
+- **Halo is capped with vsync off** (`display.vsync = false`,
+  `display.max_fps`). With vsync on at 240 Hz, Halo took enough of the
+  GPU that Breeze fell to 1.3× real time. Capped at 60–240 fps, Breeze
+  stays at 0.7–0.9×; the higher the cap, the less margin.
+- **A playback buffer for slow lines.** When Breeze runs slower than real
+  time (r×), playing a line of L seconds waits (r − 1) × L first, so it
+  never stutters. The sidecar measures r from the arriving audio and
+  estimates L from the text. Splitting at sentences lets the buffer refill
+  in natural pauses, and an instant bark ("Ugh.", "Yeah?") covers the
+  wait.
 - Fixed prompt prefixes stay in the KV cache, so the classifier only
   processes the new tokens.
-- If contention still shows up in measurements, move STT to the CPU or
-  quantize the reflex model further before anything else.
+- Parakeet stays on the GPU: on the CPU it takes 1.5–4.4 s per pass.
 
 ## What the engine already gives us
 
@@ -321,18 +337,26 @@ Sidecar → game:
   on him, or you were just talking to him.
 - **Recognition:** Parakeet on a sliding window, re-run every ~120 ms
   while you talk, so tier 1 sees partial words. Parakeet isn't a
-  streaming model, but it's fast enough on the 3090 to run this way;
-  check that in the reflex slice (M2).
+  streaming model, but at half precision a pass takes 70–110 ms on the
+  3090 next to everything else (S0), for any window up to 4 s. Whether
+  partials are stable enough is checked in the reflex slice (M2).
 - **Echo cancellation** on the mic input, so speakers don't feed Kevin's
   voice and the game back into STT.
 - **Barge-in:** if you start talking while Kevin speaks, he stops
   (`voice_cut`) and listens.
 - **Game dialogue** (Cortana, Keyes, marines): the `dialogue` event
-  carries the line's text, read from the sound's subtitle data
-  (`sound_permutation.subtitle_data`, `source/sound/sound_definitions.h:91`).
-  If a map's lines have no subtitle data, the text comes from a table made
-  once offline by running Parakeet over every dialogue sound in the maps.
-  Either way it's exact and instant, with no audio capture.
+  carries the line's text from a table made once offline, keyed by sound
+  tag and permutation, so it's exact and instant with no audio capture.
+  The maps have no subtitles: `sound_permutation.subtitle_data`
+  (`source/sound/sound_definitions.h:91`) is empty in every campaign map,
+  and the Xbox engine has no code that shows subtitles (S0). The table is
+  made by running Parakeet over every dialogue sound. About 180 story
+  lines also exist as text in the level scripts' string constants
+  (`scenario.hs_string_constants`, Bungie's debug prints, lowercase, with
+  speaker labels such as `cortana:`); where a script plays a sound next to
+  one, that text replaces Parakeet's, and the scripts' names (Foehammer,
+  Keyes) correct its spelling. The table is made from your own copy of
+  the game and stays local, out of git.
 - **Kevin looks at you while he talks** (aim overlay on your head), with
   a gesture now and then.
 - **Subtitles:** Kevin's lines appear on screen (`subtitle`), and the web
@@ -398,16 +422,16 @@ conversations; in a firefight it would be far too slow.
 
 | # | Result | Check |
 | --- | --- | --- |
-| P0 | Fork OpenCE on GitHub; game-side changes on a `kevin` branch; `kevin/` tracked | Upstream merges cleanly into the branch |
-| S0 | **Model check:** download and verify every model and its licence; time each alone and all together with Halo running; check whether the maps' dialogue sounds have subtitle data | A table of load size, latency and VRAM per model; a go / no-go for each |
+| P0 | Fork OpenCE on GitHub; game-side changes on a `kevin` branch; `kevin/` tracked. **Done** | Upstream merges cleanly into the branch |
+| S0 | **Model check:** download and verify every model and its licence; time each alone and all together with Halo running; check whether the maps' dialogue sounds have subtitle data. **Done:** see "Hardware budget" | A table of load size, latency and VRAM per model; a go / no-go for each |
 | M0 | Prototype over the telnet console, no C changes: spawn a Spartan Kevin on a30, follow, the map's own command lists, enter a vehicle. Settles the animation risk | Manual, on a30 |
 | M1 | `kevin_bridge.c`: settings, socket read every tick, framing, `state` and pushed events, the control overlay hook, `applied` timestamps, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI |
 | M2 | **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries |
 | M3 | Spawn / respawn as a Spartan, generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
 | M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
-| M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints | "Stand by that rock" moving ≤ 400 ms p95 |
+| M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
 | M6 | Keeping up: stuck detection, catch-up teleport, scripted moves, cutscene events | Kevin is beside you after every cutscene and Pelican drop through a30 and a50 |
-| M7 | The rest of the events: dialogue text from subtitles or the offline table, objective, checkpoints, level load | Cortana's lines arrive as exact text through the a30 opening |
+| M7 | The rest of the events: dialogue text from the offline table (Parakeet, corrected by the scripts' lines), objective, checkpoints, level load | Cortana's lines arrive as exact text through the a30 opening |
 | M8 | Callouts from geometry and combat intensity | Clock directions match the screen; Kevin stays brief in fights |
 | M9 | Your POV: readback, JPEG, hints | JPEGs match the screen; no frame-time spike |
 | M10 | Kevin's POV: extra render window | JPEGs from Kevin's eyes; frame-time cost measured |
@@ -418,16 +442,17 @@ conversations; in a firefight it would be far too slow.
 ## Open questions
 
 - **Spartan animations under AI** (M0).
-- **Subtitle data in the maps:** whether the Xbox maps fill
-  `subtitle_data` for dialogue, or the offline table is needed (S0).
 - **Weapon spread at 100 accuracy:** where the weapon's own error is
   applied to a shot, so it can be zeroed for Kevin alone (M4).
-- **Parakeet on a sliding window:** is it fast and stable enough for
-  partials, or does tier 1 need a dedicated streaming model or a
-  keyword-spotting model on raw audio? (M2)
-- **Reflex model:** whether Kev-4B (unverified; the link is from the
-  video description) hits ≤ 100 ms, or a small classifier trained on
-  Gemma-labelled examples does better. (M4)
+- **Parakeet partials:** it's fast enough (S0); are its partial results
+  stable enough for tier 1, or does tier 1 need a keyword-spotting model
+  on raw audio? (M2)
+- **Reflex model accuracy:** Kev-0.8B is fast enough (S0) but untrained;
+  how many of Kevin's own examples it needs to be reliable (M5).
+- **Memory in later levels:** the loadout leaves about 1 GB below the
+  point where Windows pages GPU memory and Halo freezes, measured on a30.
+  Check the heaviest levels; if it's short, run Kev and Parakeet in one
+  process or trim Kev's buffers further.
 - **Overlay vs AI:** does the AI fight the overlay (e.g. re-crouching or
   firing the tick after the mask ends)? The overlay may need to hold for
   a few ticks or set the actor's own state too. (M1)
@@ -442,8 +467,33 @@ conversations; in a firefight it would be far too slow.
 
 ## Hardware budget (RTX 3090, 24 GB)
 
-Rough figures, to check once the model files are in hand: Gemma 12B at
-Q4 ~8 GB (it also handles the views), the reflex model ~3–4 GB (less if
-it's a small classifier), Parakeet ~2 GB, the TTS model a few GB. It
-should fit beside the game. Ollama and LM Studio are already installed and
-can serve the brain.
+Measured in S0 (`kevin/tools/s0/`), each model's share of the card next
+to Halo on a30, and its speed with everything loaded:
+
+| Model | Setup | GPU memory | Speed | Verdict |
+| --- | --- | --- | --- | --- |
+| Windows and Halo | a30, 2560×1440, capped | 1.4 GB | | |
+| Breeze TTS 2 | `--fast-backbone-decode --fast-depth-decoder --fast-codec`, guidance 4 | 8.8 GB | First sound 0.2 s, 0.6–0.7× real time | **Go**, live |
+| Gemma 4 12B QAT Q4_0 | Ollama, `num_ctx` 4096, thinking off for live replies | 7.9 GB | First word 0.2–0.4 s (1.3 s for a new prompt), 67–75 tokens/s | **Go** |
+| Kev-0.8B | `run_kev.sh one`: CUDA graphs sized for one player (`kev_one_player.py`) | 2.9 GB | ~45 ms per decision | **Go**, needs training |
+| Parakeet TDT 0.6B v2 | Half precision, resident (`parakeet_serve.py`) | 1.6 GB | 70–110 ms per pass | **Go** |
+| **All together** | | **22.4–22.8 GB** | | 10-minute soak: no errors, memory flat, every line faster than real time |
+
+Windows starts paging GPU memory at about 23.7 GB used, and the game then
+freezes, so the total has to stay well under that.
+
+Choices that were measured and set aside:
+
+- **Kev-4B**: 10 GB and no more accurate than Kev-0.8B untrained (15 of
+  20 commands each).
+- **Kev-0.8B in its stock modes**: mid 4.2 GB at ~40 ms; lean 2.0 GB but
+  ~150 ms (no CUDA graphs).
+- **Breeze's full fast path** (`--fast-all`, 14.4 GB): leaves no room for
+  the brain. Adding the text-encoder and prefill graphs ran out of memory.
+  Breeze's eager mode (7.6 GB) makes speech 3.6× slower than real time.
+  Cloning a reference voice adds about 3 GB of graphs.
+- **Gemma 4 E4B and E2B**: 4.3 and ~2 GB and quicker, but terse; they
+  rarely used Kevin's memories.
+- **Gemma with thinking on**: spends its whole reply budget thinking.
+  Thinking stays on only for background work (diary, summaries,
+  relationship reviews), which isn't in a hurry.

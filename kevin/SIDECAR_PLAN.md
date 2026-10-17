@@ -17,8 +17,15 @@ and both updated in the background:
 
 Profile, memory, diary and lore feed the **brain** (tier 3) only. Their
 work runs between brain turns or in a background worker, never while a
-reflex is waiting. Brain prompt pieces that change rarely (profile, level
-briefing) are built once and kept in the model's KV cache.
+reflex is waiting, and never while Kevin is speaking: in S0 nonstop brain
+generation slowed Breeze from 0.7× to 1.5× real time, which stutters.
+Brain prompt pieces that change rarely (profile, level briefing) are
+built once and kept in the model's KV cache.
+
+Live replies run with Gemma's thinking off; with it on, a short reply's
+whole token budget goes to thinking. Background work (summaries, diary,
+relationship reviews, dynamic profile) can think, since nothing waits on
+it.
 
 ## What we take from CHIM
 
@@ -221,7 +228,12 @@ the live pages.
 - Each correction becomes an example: tier-1 phrases are added to the
   keyword grammar, and tier-2 examples go into the classifier's prompt.
 - Once there are enough, they're used (with Gemma-labelled synthetic
-  examples) to train a small classifier of our own for tier 2.
+  examples) to train Kev-0.8B for tier 2.
+- The first training comes early, with bridge milestone M5: untrained
+  Kev-0.8B picked the right action for about half of the spoken commands
+  in S0. A starting set is written by hand and with Gemma, spoken through
+  Breeze in a few voices and transcribed by Parakeet, so it has Parakeet's
+  real mistakes in it ("Ghost stand by that rock").
 
 ## Character tests
 
@@ -255,15 +267,19 @@ kevin/
     fakegame/    simulated world speaking the bridge protocol
     tests/       character test scenarios and runner
   tools/
-    dialogue_transcripts.py   offline table of dialogue text (if subtitles are missing)
-    model_check.py            S0: load and time every model
+    dialogue_transcripts.py   offline table of dialogue text (Parakeet, corrected by the scripts' lines)
+    s0/                       S0: model setup, timing, samples, soak test
+    wsl_setup.sh              the models' Python environments in WSL
   data/          kevin.db (SQLite), presets, lore, briefings
 ```
 
 Python 3.12 (installed). SQLite with FTS5 and `sqlite-vec`. The brain is
-served by llama.cpp or Ollama (installed). STT and the reflex model run
-in-process (or in a second process if the GPU scheduling needs it), with
-TTS in its own worker.
+served by Ollama on Windows. Parakeet, Kev and Breeze each run as a
+resident server in WSL (Ubuntu, `kevin/tools/wsl_setup.sh`); the sidecar
+talks to all four over local HTTP. The S0 scripts that start them
+(`run_breeze.sh`, `run_kev.sh one`, `parakeet_serve.py`) are where the
+sidecar's process manager starts from. If memory gets short, Kev and
+Parakeet can share one process.
 
 ## Milestones
 
@@ -285,5 +301,5 @@ the first parts of `speech/` and `reflex/`.
 | S11 | Facts about you, promises and jokes, story-gated lore, mission log, **About you** and **Campaign log** pages | Tell him your name and a preference; he still uses both in a new playthrough |
 | S12 | Album, past-playthrough summaries, session openers, importance scoring, consolidation, recall reinforcement | After a long playthrough, recall stays on point and the prompt stays within its budget |
 | S13 | **Combat**, **Voice**, **Subtitles** and **Recordings** pages | Every slider changes Kevin in game within a second |
-| S14 | Teaching Kevin: misfire marking, keyword and example updates, then a trained tier-2 classifier | A corrected command works the next time |
+| S14 | Teaching Kevin: misfire marking, keyword and example updates, retraining tier 2 from corrections (its first training comes earlier, with bridge M5) | A corrected command works the next time |
 | S15 | Character test set and **Tests** page | A deliberately bad prompt edit fails the set |
