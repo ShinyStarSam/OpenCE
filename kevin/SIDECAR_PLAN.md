@@ -46,6 +46,81 @@ Left out: multiple NPCs, group conversations, the narrator, biography
 CSV import, PostgreSQL, Apache/PHP, and the in-game settings hub. One
 Python process with SQLite is enough for one character on one PC.
 
+## What we take from chasm
+
+chasm (`chasmlol/chasm`, AGPL-3.0) is the video's creator's own backend
+for AI NPCs: brain, cloned voices, speech recognition, lore, actions and
+memory, for any game that writes a bridge for it. It's read as
+documentation only; nothing is copied. It has no reflex path: every turn
+is push-to-talk, then the LLM.
+
+| chasm system | What it does there | Kevin's version |
+| --- | --- | --- |
+| Witness memory (`witness.rs`) | Each event lists who was in range to see it; it becomes a narration line in each witness's history, batched, and written before that character's next turn | Kevin's history gets only what he saw (`kevin_saw`) or did. What happened out of his sight reaches him only if you tell him or he hears it on the radio. Bundled lines keep the history append-only, which keeps the brain's KV cache warm |
+| Journals and skills (`journal.rs`, `skill_creator.rs`, `skill_executor.rs`) | After a save, each character writes a journal entry. A curator with no persona reads the entries and starts, changes or stops **habits**: one real game event plus the character's first-person intention, only for a settled, repeated intention. A habit fires without the LLM when its owner witnessed the event, with a cooldown, and plants the intention as a private impulse for a normal turn | **Kevin's habits**, from his diary: "you always charge in with the Warthog; I'll be on the gun before you ask". The curator's output is limited to real event types; firing checks `kevin_saw` and a cooldown. A habit can also set a tier-0 rule parameter, so a learned reflex runs in the game with no round trip |
+| Save-aware stores (`save_sync.rs`) | Every store is copied at each save, keyed by the save, and restored on load. A store that didn't exist yet saves as empty, so a load also clears what came after | The same for every store, keyed by the checkpoint id the bridge sends (see "Saves and playthroughs") |
+| Name correction after STT (`stt_vocab_boost.py`) | Parakeet can't be biased to a word list, so near-miss proper nouns in the transcript are snapped to the character and lore names: whole words only, phonetic key plus edit distance, high thresholds, and never onto an ordinary English word | Run on every transcript and partial before tier 1, so "Cotana" is "Cortana" for the keywords as well as the brain. The word list is the lore catalog's names and aliases, rebuilt when it changes |
+| Warm-up on connect (`warmup.rs`) | A thrown-away TTS line (CUDA graph capture), a silent STT clip, a one-token LLM call with the real first prompt (fills the KV cache), the reranker's first pass | The same when the game connects, in the background, so Kevin's first line is as fast as the rest |
+| Stack lifecycle (`stack_lifecycle.rs`) | The models start when the game's heartbeat appears and stop when it goes | The sidecar's process manager starts Parakeet, Kev, Breeze and the brain with the game and stops them after it |
+| Action book (`action_book_injection.rs`) | Each action has keys, a meaning-match text, scopes and an execution body. Each turn offers only the actions whose constant, keyword or vector gate opens; the model's output is restricted to them | Tier 2 and the brain see only the actions that fit the moment, so prompts stay short and the grammar tight. Execution is a bridge command or a HaloScript line (`script`) |
+| Scenario variants and macros (`scenario_variants.rs`, `macros.rs`) | The scene text in the prompt changes with game state (following, waiting, in combat); `{{macros}}` fill in live values | Variants for following, holding, in a vehicle, in combat, stealth; macros such as `{{objective}}`, `{{level}}`, `{{your_health}}`, `{{kevin_weapon}}` |
+| Event reactions (`witness.rs` triggers) | Chosen event types make a witness speak unprompted, each type with its own chance and cooldown; reactions never stack or interrupt a reply in flight | Combat intensity's quiet-time talk, and the `trigger` flag, with a chance and cooldown per event type |
+| Sentence streaming (`/api/game/v1/turn`) | Text and audio stream sentence by sentence; each subtitle is sent just before its audio | Kevin's lines, and the `subtitle` message ahead of each sentence's audio |
+| Gamemaster pass | A persona-less pass after play updates how each character feels about the others | The relationship review (above), run as its own persona-less pass |
+| Request tracing (`request_trace.rs`) | Every turn's requests and responses kept for a trace page | The **Logs** and **Latency** pages |
+
+Left out: picking which of several NPCs speaks, schedules and travel,
+music, companion faces, and the profile-bundle import.
+
+## What we take from SkyrimNet and its plugins
+
+SkyrimNet (`MinLL/SkyrimNet-GamePlugin`) is a closed AI-NPC backend that
+runs inside Skyrim's process; SeverActions and IntelEngine are plugins
+built on it. None has a licence, so they're read as documentation only.
+
+| Idea | Where | Kevin's version |
+| --- | --- | --- |
+| A model per job: a fast one picks actions, a stronger one talks | SkyrimNet | Already the tiers; the background passes (diary, habits, reviews) get their own model setting too |
+| Actions as data: a description, typed parameters, eligibility rules (AND / OR of state checks), a priority, a cooldown, and an **event string** written to history when it fires | SkyrimNet | The action book's entries. The event string ("Kevin took the Warthog's gun") goes into his history, so the brain knows what he did |
+| Nested action categories: the model picks an intent, then a cheaper prompt picks the action | SkyrimNet | Tier 2 picks among a few categories (move, fight, vehicle, stance, talk); only that category's actions go to the second step |
+| Descriptions that say when to use an action, and when not, naming the one to use instead ("not for telling the player to wait; use ResumeFollowing") | SeverActions | How every action book entry is written |
+| An action offered when it can't be used gets called anyway, so it must never be offered | SeverActions | Eligibility checks his state (in a vehicle, in a cutscene, already holding) before anything reaches a model |
+| Triggers as data: when an event matches field conditions, do one of: a private thought, a narration line, a silent event in context, a diary entry, a profile update, a voice effect; with chance, cooldown, priority and an interrupt flag | SkyrimNet | Kevin's triggers, as files edited on a **Triggers** page with schema checks. They cover the reactions, habits' firing and combat-intensity talk |
+| World knowledge scoped by conditions (a quest stage, a location), injected always or by meaning | SkyrimNet | Story-gated lore and level briefings as conditions on level, objective and script globals ("the Flood" from the moment you meet them on 343 Guilty Spark) |
+| Voice effects as recipes of audio stages (pitch, EQ, distortion, reverb), previewable | SkyrimNet | The radio and the helmet sound as an effect on any line, not a separate TTS rendering: one bark cache instead of three; whisper stays a TTS style |
+| Private thoughts that shape later lines without being heard | SkyrimNet | The `kevin` console command and trigger thoughts go in as thoughts |
+| Earlier lines editable and deletable in the chat history | SkyrimNet | Fix a misheard transcript on the **Live** page, and the history he reads is corrected |
+| An MCP server for AI assistants: query game data and state, render a prompt, check an action's eligibility, validate files | SkyrimNet | The sidecar runs one, so an assistant (Claude Code) can inspect Kevin, render his prompt and test actions while you play |
+| Vision descriptions cached by the image's hash; a description can be locked | SkyrimNet | Kevin's album and view descriptions |
+| Models pinned by checksum when downloaded | SkyrimNet | The process manager checks each model's checksum before starting it |
+| Background LLM work in **lanes**: one request in flight per kind, each with a time limit, a minimum gap between calls, cleared on a revert, and a late reply on an old lane dropped | SeverActions | Diary, habits, relationship reviews, profile updates and bark rebuilds each run in a lane, so a stuck request never blocks the next |
+| "How they see you" reassessed at milestones (the first real conversation, every hundred lines after, a change in the bond), at most once a game day | SeverActions | Kevin's opinion of you is rewritten at milestones (a level's end, a betrayal, a save), not on a timer |
+| A history of banter topics, so they don't repeat | SeverActions | His idle talk keeps one |
+| Bio blocks: personality snippets kept in a library and applied to a character, grouped in tabs, where some tabs allow one block at a time | SeverActions | Profile presets as blocks: accent, species, mood, voice. "You're a cat now" applies the cat block and removes it again; one accent at a time |
+| Task awareness: the current task and its state, and past tasks with natural times ("just now", "earlier today") | IntelEngine | His prompt says what he's doing ("holding the bridge for you"), how he can stop, and what he did recently, with times like "a minute ago" |
+| A safety net after each conversation: a short check finds commitments ("I'll take the gun when we reach the Warthog") the reply didn't act on | IntelEngine | **Promises** become tasks with a condition (a place, an objective, an event) and fire when it's met |
+| Facts that expire, with natural time references | IntelEngine | Facts about the moment ("the Elite with the sword is still around") fade; facts about you don't |
+
+Left out: in-process hosting (Kevin's models need the GPU in WSL),
+scheduled meetings at game times, gossip chains, faction politics, the
+story Dungeon Master, and NPC-to-NPC scenes.
+
+### chasm itself as Kevin's brain (an option for M13)
+
+chasm runs as a separate program, so the sidecar could call it instead of
+building the brain: the sidecar keeps streaming STT, tiers 0–2, barks and
+the game socket, and a tier-3 turn becomes a call to chasm's
+`/api/game/v1/turn`. Its licence doesn't reach a program that only talks
+to it over HTTP. Against it, for now:
+
+- it is experimental, and its interfaces may change;
+- its speech is its own (Qwen3-TTS, Parakeet), not Breeze;
+- its event log and witness memory take events only as the FNV bridge's
+  files (`control/gameevents/`), not over HTTP, so Kevin would have to
+  write that layout or chasm grow an endpoint for it.
+
+Decide at M13 against what the sidecar has by then.
+
 ## Kevin's profile
 
 Stored as a versioned record, one active at a time, with **presets**
@@ -86,6 +161,11 @@ harmful instructions just because he's in character.
 
 - **Event log:** every game event, line of dialogue (yours and his),
   action and reflex, with game time, level and generation.
+- **What he saw:** only events with `kevin_saw` or `kevin_did` go into
+  his history, bundled into one narration line when they go quiet or the
+  bundle gets big, and always before his next turn (chasm's witness
+  memory). The rest stay in the event log, for the campaign log and the
+  service record.
 - **Working context:** the last ~2 minutes verbatim, plus a rolling
   summary of the rest of the session.
 - **Memories:** a background worker turns closed segments (a fight, a
@@ -95,7 +175,14 @@ harmful instructions just because he's in character.
 - **Pinned memories:** ones you mark in the UI are always in context.
 - **Diary:** written by the brain model in Kevin's voice at level end,
   after he dies, after big fights, or when you ask. Each entry is stored,
-  shown in a book view, readable aloud, and indexed as a memory.
+  shown in a book view, readable aloud, and indexed as a memory. Append
+  only: an entry is never rewritten.
+- **Habits:** after each diary entry, a curator pass with no persona reads
+  the new entries and starts, changes or stops a habit only when an
+  intention is clearly settled and repeated (chasm's skills, above). A
+  habit fires when he saw its event, with a cooldown, as a private
+  impulse for his next turn, or sets a tier-0 rule. The **Habits** page
+  shows them with the entries they came from.
 - **Embeddings:** a small local embedding model on the CPU, to keep the
   GPU free for reflexes.
 
@@ -172,6 +259,10 @@ needs to stay fast and on point after dozens of hours, so we add:
 - **Matching:** exact name → alias → phonetic key → bounded edit distance
   on the transcript's word windows, as Oghma does. Top 2–3 articles go
   into the prompt.
+- **Name correction:** before anything reads a transcript, near-miss
+  names in it are snapped to the catalog's names and aliases, behind high
+  thresholds and a guard that never changes an ordinary English word
+  (chasm's STT vocabulary correction).
 - **Level briefings:** one per campaign level: setting, objective in
   plain words, allies, enemies, what came before. Forced into context by
   level name, and updated when `objective_changed` arrives.
@@ -183,11 +274,15 @@ than Skyrim.
 
 - A **playthrough** is a named memory set. Start one fresh, or continue
   one.
-- At each `checkpoint` the sidecar snapshots its world facts (where
-  you are, what's done).
-- On `checkpoint_revert`, world facts roll back to that snapshot, but
-  Kevin keeps his memories of what happened ("you got us killed").
-- An option in the UI turns full rollback on instead.
+- At each `checkpoint` (with its id) the sidecar copies every store:
+  world facts, memories, diary, habits, relationships, promises. A store
+  that didn't exist yet is saved as empty, so a rollback also clears what
+  came after (as chasm's save sync does).
+- On `checkpoint_revert`, world facts roll back to that checkpoint's
+  copy, but by default Kevin keeps his memories of what happened ("you
+  got us killed").
+- An option in the UI turns full rollback on instead: every store goes
+  back, and a habit he formed in a discarded stretch is gone.
 
 ## Web UI
 
@@ -204,6 +299,9 @@ the live pages.
 | **Barks** | Categories and lines, play each in normal / whisper / radio, regenerate from personality, cache status |
 | **Memories** | Search (same hybrid ranking the brain uses), edit, pin, delete; a "why was this recalled" view for each brain turn |
 | **Diary** | Book view, read aloud, write an entry now, edit or delete |
+| **Habits** | Each habit with its trigger, intention, cooldown and the diary entries it came from; turn on or off, edit, run the curator now |
+| **Triggers** | Trigger files with schema checks: event conditions, the response, chance, cooldown, priority; test one against a recorded event |
+| **Voice effects** | The radio, helmet and other recipes, with a preview on any line |
 | **Relationships** | Kevin's affinity with you and others, tier, type, the change log with reasons; edit scores by hand |
 | **About you** | Facts Kevin knows about you, promises and running jokes; edit, add or delete |
 | **Campaign log** | The playthrough as a searchable timeline: missions, fights, deaths, conversations, album shots |
@@ -254,15 +352,19 @@ kevin/
     bridge/      socket client, framing, generation
     speech/      VAD, Parakeet, Breeze TTS, Opus, bark cache
     reflex/      tier 1 keywords, tier 2 classifier, policy
-    brain/       prompt assembly, Gemma client, action calls
+    brain/       prompt assembly, scenario variants, macros, Gemma client, action book
     vision/      view requests, image + hints → description
-    memory/      event log, summaries, hybrid search, diary
+    memory/      event log, what he saw, summaries, hybrid search, diary, habits
     lore/        catalog, matching, briefings
     profile/     profile, presets, versions, dynamic profile
     combat/      tuning settings, presets, brain limits
     callouts/    clock directions, fragments, combat intensity
     web/         FastAPI app, templates, static
     latency/     timestamps, rolling stats
+    stack/       process manager (start with the game, stop after), warm-up, checksums
+    lanes/       background LLM work, one request in flight per kind
+    triggers/    trigger files, matching, responses
+    mcp/         MCP server for AI assistants
     replay/      recorder, replayer, regression set
     fakegame/    simulated world speaking the bridge protocol
     tests/       character test scenarios and runner
@@ -288,15 +390,15 @@ the first parts of `speech/` and `reflex/`.
 
 | # | Result | Check |
 | --- | --- | --- |
-| S1 | Sidecar skeleton, SQLite schema, event log, web UI shell with the **Live** and **Latency** pages | Live page shows game state and events from the bridge |
+| S1 | Sidecar skeleton, SQLite schema, event log, web UI shell with the **Live** and **Latency** pages; the process manager and warm-up | Live page shows game state and events from the bridge; the models start with the game, and the first line is as fast as the rest |
 | S2 | **Profile** page with fields, presets and versions; brain prompt built from it; **Prompts** page with preview | Change personality in the UI; the next reply reflects it |
 | S3 | Brain turn: Gemma streaming, sentence-level TTS, action calls through the catalog, `action_result` fed back; policy updates | Conversation in game; first audio ≤ 1.2 s; "can you jump?" can be refused |
 | S4 | **Barks** page and generated bark cache; rebuild on persona change | Console "you're a cat" → cat barks within ~10 s |
 | S5 | Memory: summaries worker, hybrid search, pinned memories, **Memories** page | Kevin brings up something from an earlier level unprompted when it's relevant |
-| S6 | **Diary**: automatic and on-request entries, book view, read aloud | An entry after a30 that matches what happened |
-| S7 | **Lore** catalog, fuzzy matching, level briefings, **Lore** page with test box | "What's Cotana saying?" pulls in the Cortana article |
+| S6 | **Diary**: automatic and on-request entries, book view, read aloud; **habits** from it, with the curator and the **Habits** page | An entry after a30 that matches what happened; a habit formed from repeated behaviour fires when he sees its event |
+| S7 | **Lore** catalog, fuzzy matching, name correction of transcripts, level briefings, **Lore** page with test box | "What's Cotana saying?" pulls in the Cortana article, and the keyword tier sees "Cortana" |
 | S8 | Dynamic profile with locks and undo | Shoot near Kevin a lot; his opinion of you visibly sours |
-| S9 | **Actions**, **Models**, **Logs**, **Playthroughs** pages; checkpoint snapshot and revert | Revert a checkpoint: world facts roll back, memories stay |
+| S9 | **Actions** (the action book with its gates), **Models**, **Logs**, **Playthroughs** pages; every store copied at each checkpoint and rolled back on revert | Revert a checkpoint: world facts roll back, memories stay; with full rollback on, a habit formed after it is gone |
 | S10 | Relationships with tiers, change log and policy link; service record and nemeses; **Relationships** and **Service record** pages | Run Kevin over twice; the tier drops, the log says why, and he mentions the count |
 | S11 | Facts about you, promises and jokes, story-gated lore, mission log, **About you** and **Campaign log** pages | Tell him your name and a preference; he still uses both in a new playthrough |
 | S12 | Album, past-playthrough summaries, session openers, importance scoring, consolidation, recall reinforcement | After a long playthrough, recall stays on point and the prompt stays within its budget |

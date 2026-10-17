@@ -189,59 +189,74 @@ Tier 0 rules run in the same hook, from state the bridge already has
 (recent damage sources, your stance, nearby grenades), with parameters
 the sidecar sets.
 
-### Kevin is a Spartan: co-op player 2, driven by the engine's AI
+A task can change pace while it runs ("hurry up", "slow down": walk or
+run) and be cancelled ("stop", "never mind") without touching what's
+scheduled. While a task, a cutscene or a vehicle ride holds him, `state`
+carries a **busy reason** ("holding the bridge", "in the Warthog's
+gun"), so the brain knows what he's doing and doesn't offer actions that
+would fight it.
 
-Kevin is the second player of a local co-op game, with no controller.
-The engine's own AI drives his unit, and the bridge's overlay sits on top.
+### Places
 
-Why a player and not a spawned biped (found in M0's first try): a30's
-only Spartan placement is the cutscene puppet `chief`, which is the
-unarmed biped (`characters\cyborg\cyborg_unarmed`). The console can give
-it the AI and it follows you with normal animations, but it can't hold a
-weapon, and the console has no way to create a biped from a tag. As
-player 2 he is a real armed Spartan, and co-op gives him for free:
+At map load the bridge indexes the level's named places: trigger volumes
+(designers' names such as the bridge or a hangar), cutscene flags, named
+scenario objects and devices, and the encounters' areas. "Go to the
+bridge", "back to the lifeboat" resolve against it by fuzzy match, as
+IntelEngine indexes Skyrim's locations at load.
 
-- the player's biped, weapons, grenades, melee, flashlight, every vehicle
-  seat including the driver's, and the same physics as you;
-- respawning near you when he dies (`players_respawn_network_coop`,
-  `players_coop_spawn_location`), and the levels' own handling of player
-  2 in cutscenes and teleports (a30 has `player1_bridge_base` and
-  similar flags);
-- his own armour colour (`players_coop_color_unit`);
-- a second view of the world: split screen at first, later rendered off
-  screen as **Kevin's POV** (M10).
+Spatial words resolve from the geometry and your crosshair, not names:
+"up there" (the crosshair's hit point, higher than him), "behind that
+rock" (the far side of the object or surface from the nearest enemies),
+"take cover" (the nearest firing position or surface out of the enemies'
+sight), "outside" (the nearest exit from the cluster he is in), "over
+there" (the crosshair's hit point). They're answered as a world point
+and surface, which the task then walks to.
 
-How the AI drives a player's unit. Each tick `ai_update` runs before
-`players_update_before_game` (`source/game/game.c:362-365`), so player
-input overwrites the AI's control. The engine already lets an actor drive
-a player's unit, but only while player input is disabled
-(`actor_unit_control`, `source/ai/actors.c:4170`), which is how cutscenes
-move you. `actor_create_for_unit` accepts any living biped, a player's
-included (`actors.c:2523`). Two `port:` hooks make that true for Kevin's
-player alone:
+### Kevin is a Spartan driven by the engine's AI
 
-1. `actor_unit_control` also drives the unit when its player is Kevin.
-2. `players_update_before_game` skips Kevin's player input, and doesn't
-   write the "inhibited" control either, when his unit has an actor.
+Kevin is one more of the AI's units, not a player (M0, as built:
+`port/linux/game/kevin_bot.c`). With `kevin.enabled`, a campaign level
+played alone on this computer gets him:
 
-Starting a game: `player_spawn_count` (`source/main/main.c:708`, also a
-script global) set to 2 makes `create_local_players` make two players.
-With `kevin.enabled`, a campaign started from the menus or `map_name`
-gets player 2 as Kevin, with no profile choice and no controller.
+- **Made behind you** once the level has started and no cutscene plays:
+  the player's biped (`game_globals->player_information[0].player_unit`,
+  as `player_spawn` makes yours), in his own armour colour, with the
+  scenario's first starting profile (`player_add_equipment`), on the
+  ground you stand on, walked along it from under you so he is never put
+  inside a slope or past a wall.
+- **Made again** there 10 seconds after he dies, and at once when a revert
+  takes his unit away (a cutscene's skip reverts to a saved game; a
+  checkpoint from before he was made has no Kevin in it).
+- **His actor:** the level's actor variant named by `kevin.actor_variant`
+  (a marine with an assault rifle by default), in the first encounter on
+  the BSP loaded, kept active and never dormant. Its team comes from the
+  encounter.
 
-The actor: the bridge attaches the current map's marine variant to
-Kevin's unit each time he spawns, in an encounter it owns, so follow
-orders (`follow_target_unit` = your unit) and command lists can be given
-to him. The level scripts never touch it.
+The first prototype made him co-op player 2. That gave co-op's respawns
+and cutscene handling for free, but split the screen, gave him a sound
+listener of his own, and needed the local player count to leave him out
+for every HUD and split-screen check. As an AI unit none of that applies;
+what co-op did for him the bridge does instead (below, "Keeping up").
 
-What stays to check (M0): whether the AI treats a player's unit
-differently anywhere that matters (`actor_perception.c:1730`,
-`actor_stimulus.c:993`, `ai.c:888`, `ai_communication.c:3789`; the
-marines' "follow the players" also follows Kevin); whether co-op's extra
-enemies apply to local co-op (`network.coop_enemies`; Kevin shouldn't
-make the levels harder); and checkpoints, which in co-op wait for both
-players to be safe. A co-op game can't continue a single-player save, so
-a playthrough with Kevin starts each level as co-op.
+What M0 built on top of the AI, all in `kevin_bot.c` with one-line hooks
+in `actors.c`, `actor_moving.c`, `actor_combat.c` and
+`actor_perception.c`:
+
+- **Following:** when the AI sends him to a firing position far from you,
+  he walks to you instead, starting past 5 units and stopping inside 3;
+  he runs (combat movement) and moves any way from where he faces.
+- **Look and aim:** a critically damped spring toward where he means to
+  look (the way he goes, up or down the slope, a glance at you or around,
+  the AI's target in combat), with a turn-speed cap and his body kept
+  within 1 radian of his aim, so his view never whips or flips.
+- **Combat:** he prefers the enemy you aim at and those near you, is told
+  of them every half second, takes his own spot ahead of you toward his
+  target when the AI has no firing position near you, fires bursts more
+  often and further (his weapon's reach, not the marine's range), and
+  changes weapon by range (assault rifle near, pistol far), swapping
+  instead of reloading when an enemy is close and reloading when none is.
+- **Brought back** when he is stuck away from you or falls outside the
+  level.
 
 The actor variant sets reaction times and accuracy; see "Combat tuning".
 
@@ -276,19 +291,23 @@ limits you set.
 ### Keeping up and cutscenes
 
 - **Stuck detection:** Kevin hasn't made progress toward his goal or
-  toward you for a few seconds → he tries a jump, then a new path, then a
-  `stuck` event.
+  toward you for a few seconds → he tries a jump, then a new path, then
+  nudges toward the goal in shorter and shorter steps, and last gives up
+  with a `stuck` event, so he can say he can't get there instead of
+  standing silent (IntelEngine's stuck recovery).
+- **Departure check:** after an order to go somewhere, the bridge checks
+  that he actually set off, and escalates the same way when he didn't.
 - **Catch-up teleport:** when he's far behind (or stuck) and neither of
   you can see the spot, he's teleported to a safe point near you
-  (`teleported` event), as co-op respawns do.
-- **Scripted moves:** as player 2, Kevin is moved by the levels' own co-op
-  handling where it exists (teleports of `player1`, BSP switches, co-op
-  respawns). Where a level moves only player 1, the bridge brings Kevin
-  along on the next safe tick.
-- **Cutscenes:** `cinematic_start` / `cinematic_end` events. Co-op's
-  own handling of player 2 in cutscenes comes first (to check in M0);
-  where it leaves Kevin behind, the bridge places him beside you after
-  the cutscene.
+  (`teleported` event). M0 has the first part: after 5 seconds stuck more
+  than 10 units from you, or at once outside the level, he is put behind
+  you on your ground.
+- **Scripted moves:** the levels move only the players (teleports of
+  `player1`, BSP switches); the bridge brings Kevin along on the next safe
+  tick. After a BSP switch his encounter may be on the old BSP and stop
+  being updated, so the bridge moves him to an encounter of the new one.
+- **Cutscenes:** `cinematic_start` / `cinematic_end` events. He isn't made
+  while one plays, and the bridge places him beside you after it.
   He stays quiet, receives the cutscene's dialogue as context, and can
   comment once it's over.
 
@@ -309,14 +328,22 @@ uses the hint list, which is instant).
 - **Your POV:** read back the finished frame at present time (in
   `d3d8_gl.c`) with an async pixel buffer object, downscale to
   `kevin.view_size`, JPEG-encode on a worker thread.
-- **Kevin's POV:** after the player's window in `render_frame`, render one
-  extra `render_window` with Kevin's head as the camera (his camera
-  position and aiming vector, your FOV) into an offscreen target at
-  `kevin.view_size`. No HUD or first-person weapon. Only drawn when asked,
-  at most about once a second.
-- **Hints with each image:** the objects in that view (id, tag name, type,
-  team, distance, screen position), so "that rock" maps to an object id
-  and world point.
+- **Kevin's POV (built):** drawn only when a frame is asked for
+  (`kevin_view_request`; `debug.kevin_view_every` asks on a timer):
+  one extra `render_window` from his eyes along his aim, your field of
+  view, no HUD and not his own body or weapon, into the top left quarter
+  of the screen's target before your view covers it. It's read back
+  through a pixel buffer object and a fence, so nothing waits for the GPU;
+  the frame arrives a frame or more later. About 1 ms of the processor's
+  time to draw (`port/linux/game/kevin_view.c`).
+- **Labels with each image**, as CHIM's vision sends them
+  (`HerikaEyes.cpp`): the objects in that exact frame, worked out on the
+  game's tick when the frame is drawn and frozen with it: id, tag name,
+  type, team, alive, distance, and its screen position (0–1, from the top
+  left). Only objects he (or you) has a line of sight to, plus whatever is
+  under the crosshair; sorted crosshair first, then nearest the centre,
+  then nearest; at most 12. So "that one" or "that rock" maps to an
+  object id and world point that the vision model can name.
 - JPEG encoding: `stb_image_write` (public domain), vendored in
   `port/third_party/` with a README.
 - Check: what per-window state `render_player_frame` assumes, and how the
@@ -335,7 +362,8 @@ Game → sidecar:
   Kevin's position/facing/stance/health/shield/weapon/ammo/vehicle
   seat/alive, distance between you, nearby objects within ~30 units (id,
   tag name, type, team, position, alive).
-- Events, pushed at once, with a `trigger` flag: `damaged` (by whom),
+- Events, as below ("Events and what Kevin saw"), with a `trigger`
+  flag: `damaged` (by whom),
   `shields_down`, `died`, `respawned`, `kill`, `enemy_seen`,
   `grenade_near`, `player_damaged`, `player_died`, `player_shot_kevin`,
   `dialogue` (speaker + sound tag name), `checkpoint`,
@@ -344,7 +372,11 @@ Game → sidecar:
   `ptt_up`, `console` (text after `kevin`), `reflex_fired` (a tier-0
   rule acted), `action_result`, `applied` (the tick a command took
   effect, for measuring).
-- `view` replies: which POV, the JPEG, the hints.
+- `view` replies: which POV, the JPEG, the labels.
+- `snapshot`, at each checkpoint: your health, shield, weapons and ammo,
+  grenades, the level and objective, deaths so far. The data behind the
+  brain's description of how you're doing (the FNV bridge sends one like
+  it on every save), with no image.
 
 Sidecar → game:
 
@@ -359,17 +391,56 @@ Sidecar → game:
 - `tuning` {any combat tuning setting}, `preset` {name}
 - `teleport_near_player`, `release` (hand Kevin back to the game AI)
 - `request_view` {player | kevin}
+- `script` {line}: a HaloScript line from the action book (enter a
+  vehicle, an AI command list, look at, crouch), so a new action needs no
+  C. Only functions on the bridge's allowed list are run, and only from
+  the local socket: whatever another process sends is untrusted.
+- `urgent` {event types}: which events are sent at once (below)
 - `voice` (20 ms Opus frames at 48 kHz), `voice_end`, `voice_cut` (stop
   at once, e.g. when you shout "shut up")
 - `subtitle` {text, duration}: Kevin's line on screen
 - `gesture` {name}: a gesture animation while he talks
 
+### Events and what Kevin saw
+
+From the chasm FNV bridge's event log, cut down to one witness:
+
+- Each event has an id, a type, a one-line summary, game time, level, the
+  objects involved, and **`kevin_in_range`**, **`kevin_saw`** (his facing
+  and a line-of-sight ray at the time) and **`kevin_did`** (he caused it,
+  so it isn't something he "saw").
+- Events go out in batches, every 2.5 seconds or when a batch is full. The
+  types the sidecar marks `urgent` (shots at him, a grenade near, you
+  shooting him, his death) go out at once.
+- A burst (twenty shots, a long firefight) becomes one aggregate: the
+  first event goes at once, the rest are merged into one with
+  `memory_only`, so a reaction fires once.
+- `checkpoint` and `checkpoint_revert` carry the checkpoint's id, so the
+  sidecar rolls its stores back to the right one. The game doesn't wait
+  for the sidecar (Halo saves checkpoints too often for that).
+- Every command names its target by object id. The bridge checks that the
+  id is still that object, alive, and in range before acting, and answers
+  with `action_result` either way: a sent command isn't proof it happened.
+
 ### Voice and hearing
 
 - **Kevin's voice:** barks and brain lines go out as Opus frames; the
   bridge plays them through `voice_audio_play` with gain and pan from
-  Kevin's position relative to the camera. Past a set distance the
-  sidecar uses the radio style.
+  Kevin's position relative to the camera. As the FNV bridge plays its
+  NPCs' lines: one stream per line, silence where a frame is late rather
+  than a stutter, frames of an old line dropped, and a line that never
+  finishes cleared after a timeout.
+- **Can Kevin hear you?** As CHIM's spatial hearing: within a set
+  distance and in sight he hears you directly; further, or round a wall,
+  over the radio. That decides whether his reply is spoken in the room or
+  in the radio style, and the radio voice plays at its own volume, not
+  from his position.
+- **Whisper and shout:** speak quietly (the mic level, or while you're
+  crouched) and Kevin whispers back and keeps his lines short; shout and
+  he raises his voice. As CHIM's conversation modes.
+- **Looking at him:** your crosshair resting on Kevin for a moment sends a
+  `looked_at` event (CHIM's gaze dwell), so he can react, and an
+  utterance while you look at him is for him.
 - **Push-to-talk by default:** the game's own push-to-talk binding
   (`controls.push_to_talk`, V) sends `ptt_down` / `ptt_up` the moment
   it's pressed, so the sidecar opens the mic with no delay. **Open mic**
@@ -455,9 +526,60 @@ borrows, single-character only:
 | Lore knowledge base | One briefing file per level, plus a short lore file |
 | Voice filter presets | Normal / whisper / radio styles |
 
+CHIM's game plugin (`Dwemer-Dynamics/CHIM`, GPL-3.0: read as
+documentation only, never copied) adds:
+
+| CHIM plugin idea | For Kevin |
+| --- | --- |
+| Vision with the actors in the frame, their screen positions and ids (`HerikaEyes.cpp`) | The labels sent with each view |
+| Spatial hearing: distance, line of sight, indoor and outdoor ranges (`SpatialAwareness`) | Direct speech or radio |
+| Conversation modes: whisper, close, shout | Whisper and shout |
+| Gaze dwell: the crosshair resting on an actor | `looked_at` |
+| Actions target the live reference id, checked before acting | Object ids, checked, with `action_result` |
+| Requests tagged with the load they belong to; work from an older load is dropped | `generation` |
+| A successful reply isn't proof the right actor acted | `action_result` for every command |
+
 What CHIM doesn't have, and Kevin needs: a reflex path. In CHIM, every
 turn goes through the server and an LLM. That's fine for Skyrim
 conversations; in a firefight it would be far too slow.
+
+## Pointers taken from SkyrimNet and its plugins
+
+SkyrimNet (`MinLL/SkyrimNet-GamePlugin`, the public files of a closed
+backend that runs inside Skyrim's process), SeverActions
+(`Severause/SeverActions`) and IntelEngine
+(`galanx/IntelEngine-GamePlugin`), plugins built on it. None has a
+licence, so they're read as documentation only.
+
+| Idea | For Kevin |
+| --- | --- |
+| Action eligibility worked out while you're still speaking | The bridge keeps the `state` fields eligibility needs current, so tier 2 never waits on the game |
+| A busy reason that other systems respect | `state`'s busy reason |
+| Named places indexed at load; spatial words resolved from geometry (IntelEngine) | "Places" |
+| Stuck recovery that escalates and ends by saying so; departure checks (IntelEngine) | "Keeping up" |
+| Pace changes and cancelling mid-task (IntelEngine) | Tasks |
+| An MCP server over the game's data and state | The sidecar's MCP server (SIDECAR_PLAN.md), with the bridge's `state` and object queries behind it |
+
+## Pointers taken from chasm and its FNV bridge
+
+chasm (`chasmlol/chasm`, AGPL-3.0) is the video's creator's backend for
+AI NPCs, and Chasm Bridge FNV (`chasmlol/chasm-bridge-fnv`, no licence)
+its Fallout: New Vegas game side. Both are read as documentation only;
+nothing is copied. Neither has a reflex path or anything for Halo.
+
+| Idea | For Kevin |
+| --- | --- |
+| Events with who witnessed them, and who was in range but didn't see | `kevin_in_range`, `kevin_saw`, `kevin_did` |
+| Events batched; trigger types flushed at once; bursts aggregated, the first firing alone | Batches, `urgent`, `memory_only` aggregates |
+| Save events with ids, so the backend's stores roll back | `checkpoint` / `checkpoint_revert` with ids |
+| A heartbeat with the game's state every ~100 ms | The `state` message |
+| Streamed speech: one buffer per line, silence-filled, stale chunks dropped, stuck replies recovered | Kevin's voice playback |
+| Actions as script bodies from an action book, run by the game | `script`, limited to allowed functions |
+| A player snapshot at each save, as data, not a picture | `snapshot` |
+| The backend's model stack started when the game connects and stopped when it exits | The sidecar's process manager (SIDECAR_PLAN.md) |
+
+The rest (witness memory, habits, warm-up, the action book's gates,
+scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 
 ## Milestones
 
@@ -465,28 +587,28 @@ conversations; in a firefight it would be far too slow.
 | --- | --- | --- |
 | P0 | Fork OpenCE on GitHub; game-side changes on a `kevin` branch; `kevin/` tracked. **Done** | Upstream merges cleanly into the branch |
 | S0 | **Model check:** download and verify every model and its licence; time each alone and all together with Halo running; check whether the maps' dialogue sounds have subtitle data. **Done:** see "Hardware budget" | A table of load size, latency and VRAM per model; a go / no-go for each |
-| M0 | **Console part (done):** a30's `chief` puppet given the AI follows you with normal animations, but it's the unarmed biped. **Co-op proof, no C:** `player_spawn_count` 2, `map_name a30`, attach the AI to player 2's unit, and disable player input (which the engine needs before an actor may drive a player's unit). **C prototype:** `kevin.enabled` makes player 2 Kevin, the two hooks above, the actor attached on every spawn in an encounter of the bridge's own, follow you | Kevin, armed, follows you through the a30 opening while you play, gets into the Warthog's gun seat, respawns after dying; split screen shows his view |
-| M1 | `kevin_bridge.c`: settings, socket read every tick, framing, `state` and pushed events, the control overlay hook, `applied` timestamps, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI |
+| M0 | **Done.** Kevin as an AI-driven Spartan (`kevin_bot.c`): made behind you, made again after he dies, following, look and aim, combat and weapon choice, brought back when stuck; his view drawn off screen on request (`kevin_view.c`). (A first version made him co-op player 2; see "Kevin is a Spartan") | Kevin, armed, follows you through the a30 opening while you play, gets into the Warthog's gun seat, comes back after dying; frames of his view arrive with no cost to yours |
+| M1 | `kevin_bridge.c`: settings, socket read every tick, framing, `state`, events with `kevin_in_range` / `kevin_saw` / `kevin_did`, batches and `urgent` types, checkpoint ids, the control overlay hook, `applied` timestamps and `action_result`, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI |
 | M2 | **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries |
-| M3 | Kevin's player across level loads and checkpoint reverts (actor re-attached each spawn), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
+| M3 | Kevin across level loads, BSP switches and checkpoint reverts (made again or moved to the new BSP's encounter), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
 | M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
 | M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
 | M6 | Keeping up: stuck detection, catch-up teleport, scripted moves, cutscene events | Kevin is beside you after every cutscene and Pelican drop through a30 and a50 |
 | M7 | The rest of the events: dialogue text from the offline table (Parakeet, corrected by the scripts' lines), objective, checkpoints, level load | Cortana's lines arrive as exact text through the a30 opening |
 | M8 | Callouts from geometry and combat intensity | Clock directions match the screen; Kevin stays brief in fights |
-| M9 | Your POV: readback, JPEG, hints | JPEGs match the screen; no frame-time spike |
-| M10 | Kevin's POV: extra render window | JPEGs from Kevin's eyes; frame-time cost measured |
-| M11 | Voice playback: positional, radio, barge-in, echo cancellation, open-mic mode, look-at-you and gestures, subtitles | Walk away from Kevin; interrupt him mid-line; subtitles match his lines |
+| M9 | Your POV: readback, JPEG, labels; HaloScript `script` actions with the allowed list; `snapshot` | JPEGs match the screen; no frame-time spike; a label's object id is the object at that spot |
+| M10 | Kevin's POV: the frame is drawn and read back (done); JPEG, downscaling and labels | JPEGs from Kevin's eyes with labels; frame-time cost measured |
+| M11 | Voice playback: streamed, positional, radio by hearing, whisper and shout, barge-in, echo cancellation, open-mic mode, `looked_at`, look-at-you and gestures, subtitles | Walk away from Kevin; interrupt him mid-line; subtitles match his lines |
 | M12 | `kevin <text>` and `say <text>` console commands | Typed lines reach the brain |
 | M13 | Brain and character systems (step 3, SIDECAR_PLAN.md): policy, conversation, profile, memory, diary, lore, web UI | Talking to Kevin in game; first audio ≤ 1.2 s |
 
 ## Open questions
 
-- **The AI on a player's unit** (M0): the places the AI treats players
-  differently, co-op's extra enemies, co-op checkpoints.
-- **An encounter of the bridge's own** (M0): whether one can be added at
-  map load like the command lists, or Kevin borrows a quiet friendly
-  encounter of the map at first.
+- **His encounter after a BSP switch** (M3): whether the first
+  encounter on the new BSP takes him, or the bridge needs an encounter of
+  its own.
+- **Shooting Kevin:** whether the AI turns on you after friendly fire, as
+  marines do, before tier 0's own betrayal rule; tier 0 should decide.
 - **Weapon spread at 100 accuracy:** where the weapon's own error is
   applied to a shot, so it can be zeroed for Kevin alone (M4).
 - **Parakeet partials:** it's fast enough (S0); are its partial results
@@ -507,8 +629,9 @@ conversations; in a firefight it would be far too slow.
   address or validates the count (tag validator, saved games, BSP
   switches).
 - **Extra render window:** side effects on your view and its cost.
-- **Checkpoint reverts and saves:** Kevin's unit index may change or
-  vanish; the bridge has to find or respawn him.
+- **Checkpoint reverts and saves:** Kevin's unit can vanish in a revert;
+  M0 makes him again at once. What the sidecar keeps across a revert is
+  its rollback setting (SIDECAR_PLAN.md).
 
 ## Hardware budget (RTX 3090, 24 GB)
 
