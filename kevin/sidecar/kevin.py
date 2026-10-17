@@ -30,6 +30,11 @@ from speech.parakeet import Parakeet  # noqa: E402
 import protocol  # noqa: E402
 
 DATA = os.path.join(HERE, "data")
+# tier 0 (kevin_bridge.c), as Kevin starts: he fires back after two hits by
+# you within 3 seconds, for 3 seconds; he runs from grenades within 3 units
+RULES = {"type": "rules", "hostile": {"on": True, "hits": 2, "seconds": 3, "fire_seconds": 3},
+         "grenade_dive": {"on": True, "distance": 3}, "stealth": False, "hold_fire_until_engaged": False}
+URGENT = ["reflex_fired", "player_shot_kevin", "kevin_died", "player_died"]
 # a reflex's record is written this long after its utterance ends, complete or not
 RECORD_WAIT_SECONDS = 2.0
 
@@ -69,6 +74,8 @@ class Kevin:
     # ---------- the game
 
     def _connect(self, hello):
+        self.bridge.send({"type": "urgent", "types": URGENT})
+        self.bridge.send(RULES)
         self.bridge.send({"type": "hearing", "on": True})
 
     def _message(self, message, now):
@@ -84,6 +91,10 @@ class Kevin:
             else:
                 self.ptt.setdefault(utterance, {})["up"] = now
                 self.hearing.end(utterance, now)
+        elif kind == "events":
+            for event in message.get("events", []):
+                if event.get("event") == "reflex_fired":
+                    self.log(f"kevin: tier 0 {event.get('rule')}: {event.get('summary')}")
         elif kind == "voice":
             with self.lock:
                 self.speaking = bool(message.get("playing"))

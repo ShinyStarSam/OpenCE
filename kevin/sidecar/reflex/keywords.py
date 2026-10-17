@@ -26,7 +26,14 @@ ACTIONS = {
     "hold_fire": (["hold fire", "hold your fire", "cease fire", "stop shooting", "don't shoot", "do not shoot"],
                    [{"type": "fire_mode", "mode": "hold"}], "ack"),
     "fire": (["open fire", "fire at will", "weapons free", "go loud", "light them up", "fire"],
-             [{"type": "fire_mode", "mode": "free"}], "ack"),
+             [{"type": "fire_mode", "mode": "free"},
+              {"type": "rules", "stealth": False, "hold_fire_until_engaged": False}], "ack"),
+    # tier 0's stealth: he crouches when you do, and holds fire until you fire
+    "stealth": (["stealth mode", "go quiet", "stay quiet", "keep quiet", "quiet now", "sneak"],
+                [{"type": "rules", "stealth": True, "hold_fire_until_engaged": True}], "ack"),
+    # after firing back at you
+    "calm": (["calm down", "stand down", "it was an accident", "my bad", "sorry"],
+             [{"type": "set_hostile", "on": False}], "ack"),
     "reload": (["reload"], [{"type": "press", "flag": "reload"}], "ack"),
     "grenade": (["grenade", "frag", "throw a grenade", "nade"], [{"type": "press", "flag": "grenade"}], "ack"),
     "flashlight": (["flashlight", "light on", "light off", "lights"], [{"type": "press", "flag": "flashlight"}],

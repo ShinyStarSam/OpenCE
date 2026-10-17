@@ -595,6 +595,9 @@ static const struct config_setting config_settings[] =
 		"A folder to save frames to (with screenshot_every); empty none." },
 	{ "debug.screenshot_every", _config_integer, "0", "HALO_SCREENSHOT_EVERY", _environment_value, _platform_all,
 		"Save every this many frames to screenshot_directory; 0 none." },
+	{ "debug.kevin_bridge_test", _config_boolean, "false", "HALO_KEVIN_BRIDGE_TEST", _environment_set_is_true, _platform_desktop,
+		"Kevin's sidecar may send `test`, which makes the causes of his\n"
+		"in-game reflexes happen (kevin_bridge.c), for kevin/tools/m3_rules_test.py." },
 	{ "debug.kevin_view_every", _config_integer, "0", "HALO_KEVIN_VIEW_EVERY", _environment_value, _platform_desktop,
 		"Draw a frame of Kevin's view (kevin_view.c) every this many seconds;\n"
 		"0 only when his AI asks for one." },

@@ -13,7 +13,9 @@ same way, refusing with the same reasons.
 Its microphone is what a test gives `say()`: while the sidecar asks to hear
 (`hearing`), it's sent as the game sends it (`ptt` down, kind 2 frames, `ptt`
 up). Kevin's voice (kind 3) is "played" in real time, with `voice` as it
-starts and stops.
+starts and stops. Tier 0's `rules` are taken as the game takes them, and
+with test=True (the game's debug.kevin_bridge_test) `test` makes their
+causes happen, each rule firing on the tick of its cause.
 
     python kevin/sidecar/fakegame/fakegame.py [--port 2325] [--seed 1]
 """
@@ -83,6 +85,8 @@ class Unit:
         self.alive = True
         self.weapon = weapon
         self.rounds = rounds
+        self.crouching = False
+        self.firing = False
 
     def state(self):
         return {
@@ -96,12 +100,22 @@ class Unit:
             "vehicle": None,
             "weapon": self.weapon,
             "rounds": self.rounds,
+            "crouching": self.crouching,
+            "firing": self.firing,
         }
 
 
 class FakeGame:
-    def __init__(self, port, seed=1, revert_seconds=120.0, log=print):
+    def __init__(self, port, seed=1, revert_seconds=120.0, log=print, test=False):
         self.port = port
+        self.test = test
+        # tier 0
+        self.rules = {"hostile": False, "hits": 2, "seconds": 3.0, "fire_seconds": 5.0, "dive": False,
+                      "distance": 3.0, "stealth": False, "hold": False}
+        self.hits = []
+        self.hostile_ticks = 0
+        self.you_crouching = False
+        self.engaged = False
         self.random = random.Random(seed)
         self.revert_ticks = int(revert_seconds * TICKS_PER_SECOND) if revert_seconds > 0 else 0
         self.log = log
@@ -275,6 +289,21 @@ class FakeGame:
         if kind == "request_view":
             self.result(command_id, True, "view asked for")
             return
+        if kind == "rules":
+            self.set_rules(message, command_id)
+            return
+        if kind == "set_hostile":
+            on = message.get("on", False)
+            if not isinstance(on, bool):
+                raise Refused(command_id, "on is not true or false")
+            self.hostile_ticks = int(self.rules["fire_seconds"] * TICKS_PER_SECOND) if on else 0
+            self.result(command_id, True, "hostile" if on else "not hostile")
+            return
+        if kind == "test" and self.test:
+            if not self.stimulus(message.get("stimulus")):
+                raise Refused(command_id, "no such stimulus, or none possible now")
+            self.result(command_id, True, "stimulus")
+            return
         if kind == "hearing":
             on = message.get("on", True)
             if not isinstance(on, bool):
@@ -350,6 +379,87 @@ class FakeGame:
 
     # ---- the connection
 
+    # ---- tier 0
+
+    def set_rules(self, message, command_id):
+        rules = dict(self.rules)
+
+        def member(container, key, kind, low=None, high=None):
+            if key not in container:
+                return None
+            value = container[key]
+            if kind is bool:
+                return value if isinstance(value, bool) else Refused
+            if not number(value) or value < low or value > high:
+                return Refused
+            return value
+
+        hostile = message.get("hostile")
+        if hostile is not None:
+            values = [member(hostile, "on", bool), member(hostile, "hits", float, 1, 10),
+                      member(hostile, "seconds", float, 0.1, 30), member(hostile, "fire_seconds", float, 0.1, 30)] \
+                if isinstance(hostile, dict) else [Refused]
+            if Refused in values:
+                raise Refused(command_id, "hostile is {on, hits 1-10, seconds and fire_seconds 0.1-30}")
+            for key, value in zip(("hostile", "hits", "seconds", "fire_seconds"), values):
+                if value is not None:
+                    rules[key] = int(value) if key == "hits" else value
+        dive = message.get("grenade_dive")
+        if dive is not None:
+            values = [member(dive, "on", bool), member(dive, "distance", float, 0.5, 10)] \
+                if isinstance(dive, dict) else [Refused]
+            if Refused in values:
+                raise Refused(command_id, "grenade_dive is {on, distance 0.5-10}")
+            for key, value in zip(("dive", "distance"), values):
+                if value is not None:
+                    rules[key] = value
+        stealth = member(message, "stealth", bool)
+        hold = member(message, "hold_fire_until_engaged", bool)
+        if Refused in (stealth, hold):
+            raise Refused(command_id, "stealth and hold_fire_until_engaged are true or false")
+        if stealth is not None:
+            rules["stealth"] = stealth
+        if hold is not None:
+            rules["hold"] = hold
+            if hold:
+                self.engaged = False
+        if not rules["hostile"]:
+            self.hostile_ticks = 0
+        self.rules = rules
+        self.result(command_id, True, "rules set")
+
+    def rule_fired(self, rule, summary):
+        self.event("reflex_fired", summary, self.kevin, kevin_did=True, rule=rule)
+
+    def stimulus(self, stimulus):
+        if stimulus in ("you_crouch", "you_stand"):
+            crouching = stimulus == "you_crouch"
+            if crouching and not self.you_crouching and self.rules["stealth"]:
+                self.rule_fired("stealth_crouch", "You crouched; so did Kevin.")
+            self.you_crouching = crouching
+            return True
+        if stimulus == "you_fire":
+            if self.rules["hold"] and not self.engaged:
+                self.engaged = True
+                self.rule_fired("engaged", "You fired; Kevin fires as he likes.")
+            return True
+        if not self.kevin or not self.kevin.alive:
+            return False
+        if stimulus == "you_hit_kevin":
+            self.event("player_shot_kevin", "You shot Kevin.", self.kevin)
+            self.hits = [tick for tick in self.hits if self.tick - tick <= self.rules["seconds"] * TICKS_PER_SECOND]
+            self.hits.append(self.tick)
+            if self.rules["hostile"] and not self.hostile_ticks and len(self.hits) >= self.rules["hits"]:
+                self.hostile_ticks = int(self.rules["fire_seconds"] * TICKS_PER_SECOND)
+                self.hits = []
+                self.rule_fired("hostile", "You shot Kevin once too often; he fires back.")
+            return True
+        if stimulus == "grenade":
+            if self.rules["dive"]:
+                self.rule_fired("grenade_dive", "Kevin ran from a grenade.")
+            return True
+        return False
+
     def disconnect(self, why):
         if self.client:
             self.client.close()
@@ -357,6 +467,8 @@ class FakeGame:
         self.client = None
         self.sending = b""
         self.release_overlay("the sidecar is gone")
+        self.rules.update(hostile=False, dive=False, stealth=False, hold=False)
+        self.hostile_ticks = 0
         self.hearing = False
         self.voice_samples = 0
 
@@ -576,6 +688,9 @@ class FakeGame:
             self.new_generation("checkpoint revert")
 
     def send_state(self):
+        if self.kevin:
+            self.kevin.crouching = "crouch" in self.hold_flags or (self.rules["stealth"] and self.you_crouching)
+            self.kevin.firing = self.hostile_ticks > 0
         nearby = []
         for unit in self.enemies:
             if math.dist(unit.position, self.you.position) <= NEARBY_DISTANCE:
@@ -595,6 +710,8 @@ class FakeGame:
         if self.client and not self.silent and time.monotonic() - self.last_message > SILENT_SECONDS:
             self.silent = True
             self.release_overlay("the sidecar is silent")
+        if self.hostile_ticks:
+            self.hostile_ticks -= 1
         self.hear()
         self.speak()
         self.simulate()
@@ -639,9 +756,10 @@ def main():
     parser.add_argument("--port", type=int, default=protocol.GAME_PORT + 1)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--revert-seconds", type=float, default=120.0, help="revert to the last checkpoint this often; 0 never")
+    parser.add_argument("--test", action="store_true", help="take `test` (as debug.kevin_bridge_test)")
     arguments = parser.parse_args()
     try:
-        FakeGame(arguments.port, arguments.seed, arguments.revert_seconds).run()
+        FakeGame(arguments.port, arguments.seed, arguments.revert_seconds, test=arguments.test).run()
     except KeyboardInterrupt:
         pass
 

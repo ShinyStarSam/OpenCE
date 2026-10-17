@@ -26,6 +26,13 @@ effect on this tick's control, and sends:
 Kevin's voice comes as kind 3 messages (48 kHz), queued and played
 through voice chat's mixer (voice_audio.c); a new line cuts off the last.
 
+Tier 0 (`rules`) runs here with no round trip, on the tick its cause
+happens, each with a `reflex_fired` event: he fires back at you for a while
+when you shoot him so many times so quickly; he runs from a grenade near
+him; in stealth he crouches when you do; and he holds his fire until you
+fire or he is hit. With debug.kevin_bridge_test, `test` makes their causes
+happen, for the scripted check (kevin/tools/m3_rules_test.py).
+
 The sidecar's commands lay an overlay on the AI's control of Kevin
 (`press`, `hold`, `fire_mode`, `aim_at`); the AI keeps running beneath,
 and takes over again as the overlay ends. `release` clears it at once, as
@@ -43,6 +50,7 @@ with a reason, never applied in part.
 #include "bungie_net/network/transport_address_constants.h"
 #include "bungie_net/network/transport_endpoint.h"
 #include "game/game.h"
+#include "game/game_globals.h"
 #include "game/players.h"
 #include "items/weapons.h"
 #include "math/real_math.h"
@@ -120,6 +128,15 @@ enum
 	KEVIN_VOICE_QUEUE_SAMPLES = 10 * 48000,
 	KEVIN_VOICE_MIXER_SAMPLES = 48000 / 5,
 
+	/* tier 0: the hits by you remembered, and the rules' defaults (ticks) */
+	KEVIN_MAXIMUM_HITS = 10,
+	KEVIN_DEFAULT_HOSTILE_HITS = 2,
+	KEVIN_DEFAULT_HOSTILE_WINDOW_TICKS = 3 * 30,
+	KEVIN_DEFAULT_HOSTILE_FIRE_TICKS = 5 * 30,
+	KEVIN_DIVE_TICKS = 18,
+	/* (the test's grenade is taken away before it can go off) */
+	KEVIN_TEST_GRENADE_TICKS = 3,
+
 	/* the longest press or aim (ticks) */
 	KEVIN_MAXIMUM_PRESS_TICKS = 300,
 	KEVIN_MAXIMUM_AIM_TICKS = 900,
@@ -147,6 +164,8 @@ enum
 his aim (a cosine: 60 degrees) */
 #define KEVIN_WITNESS_DISTANCE 40.f
 #define KEVIN_WITNESS_COSINE 0.5f
+/* he runs from a grenade this near (world units) */
+#define KEVIN_DEFAULT_DIVE_DISTANCE 3.f
 
 /* ---------- structures */
 
@@ -243,6 +262,34 @@ static struct
 	long voice_line;
 	boolean voice_playing;
 	boolean voice_overflowed;
+
+	/* tier 0: the rules the sidecar set... */
+	boolean rule_hostile;
+	long hostile_hits;
+	long hostile_window_ticks;
+	long hostile_fire_ticks;
+	boolean rule_dive;
+	real dive_distance;
+	boolean rule_stealth;
+	boolean rule_hold_until_engaged;
+	/* ... and what they're doing */
+	long hit_ticks[KEVIN_MAXIMUM_HITS];
+	long hit_count;
+	long hostile_ticks;           /* left of his firing back at you */
+	long dive_ticks;              /* left of his run from a grenade */
+	real_vector2d dive_way;
+	long dive_grenade_index;
+	boolean stealth_crouching;
+	boolean engaged;
+	long your_weapon_index;
+	short your_rounds_loaded;
+
+	/* debug.kevin_bridge_test: your crouch and fire as the test says (-1,
+	FALSE: as you do), and its grenade */
+	short test_you_crouch;
+	boolean test_you_fired;
+	long test_grenade_index;
+	long test_grenade_ticks;
 
 	/* what is watched for events */
 	long kevin_unit_index;
@@ -580,6 +627,8 @@ static boolean kevin_json_get_boolean(
 
 static void kevin_bridge_disconnect(
 	char const *why);
+static long kevin_bridge_your_unit(
+	void);
 
 static void kevin_bridge_flush(
 	void)
@@ -766,6 +815,11 @@ static void kevin_bridge_release(
 	kevin_bridge_globals.aim = _kevin_aim_none;
 	kevin_bridge_globals.aim_ticks = 0;
 	kevin_bridge_globals.pending_count = 0;
+	if (kevin_bridge_globals.hostile_ticks || kevin_bridge_globals.dive_ticks)
+		any = TRUE;
+	kevin_bridge_globals.hostile_ticks = 0;
+	kevin_bridge_globals.dive_ticks = 0;
+	kevin_bridge_globals.hit_count = 0;
 	if (any)
 		error(_error_silent, "kevin bridge: Kevin is the game's AI again (%s)", why);
 
@@ -814,6 +868,39 @@ static boolean kevin_bridge_ticks(
 	*ticks = (long)value;
 
 	return TRUE;
+}
+
+/* a member's number within its limits, left as it is when there's none;
+FALSE when it's there but no such number */
+static boolean kevin_bridge_member_number(
+	struct kevin_json const *json,
+	long parent_index,
+	char const *key,
+	double minimum,
+	double maximum,
+	double *value)
+{
+	long token_index = kevin_json_find(json, parent_index, key);
+	double number;
+
+	if (token_index == NONE)
+		return TRUE;
+	if (!kevin_json_get_number(json, token_index, &number) || number < minimum || number > maximum)
+		return FALSE;
+	*value = number;
+
+	return TRUE;
+}
+
+static boolean kevin_bridge_member_boolean(
+	struct kevin_json const *json,
+	long parent_index,
+	char const *key,
+	boolean *value)
+{
+	long token_index = kevin_json_find(json, parent_index, key);
+
+	return token_index == NONE || kevin_json_get_boolean(json, token_index, value);
 }
 
 /* ---------- private code: Kevin's voice */
@@ -1019,6 +1106,265 @@ static void kevin_bridge_hear(
 	return;
 }
 
+/* ---------- private code: tier 0 */
+
+static void kevin_bridge_rule_fired(
+	char const *rule,
+	char const *summary,
+	long object_index)
+{
+	char fields[64];
+	long fields_length = 0;
+
+	kevin_bridge_append(fields, sizeof(fields), &fields_length, "\"rule\":\"%s\"", rule);
+	kevin_bridge_event("reflex_fired", summary, object_index, TRUE, fields);
+
+	return;
+}
+
+/* a hit on him by you: he fires back once there have been enough of them
+soon enough */
+static void kevin_bridge_rule_hit_by_you(
+	void)
+{
+	long now = game_time_get();
+	long recent = 0;
+	long index;
+
+	if (kevin_bridge_globals.hit_count == KEVIN_MAXIMUM_HITS)
+	{
+		memmove(kevin_bridge_globals.hit_ticks, kevin_bridge_globals.hit_ticks + 1,
+			sizeof(long) * (KEVIN_MAXIMUM_HITS - 1));
+		kevin_bridge_globals.hit_count--;
+	}
+	kevin_bridge_globals.hit_ticks[kevin_bridge_globals.hit_count++] = now;
+	if (!kevin_bridge_globals.rule_hostile || kevin_bridge_globals.hostile_ticks > 0)
+		return;
+	for (index = 0; index < kevin_bridge_globals.hit_count; index++)
+	{
+		if (now - kevin_bridge_globals.hit_ticks[index] <= kevin_bridge_globals.hostile_window_ticks)
+			recent++;
+	}
+	if (recent < kevin_bridge_globals.hostile_hits)
+		return;
+	kevin_bridge_globals.hostile_ticks = kevin_bridge_globals.hostile_fire_ticks;
+	kevin_bridge_globals.hit_count = 0;
+	kevin_bridge_rule_fired("hostile", "You shot Kevin once too often; he fires back.", kevin_bot_unit_index());
+
+	return;
+}
+
+/* he holds his fire until you fire, or he is hit by someone else */
+static void kevin_bridge_rule_engage(
+	char const *why)
+{
+	if (!kevin_bridge_globals.rule_hold_until_engaged || kevin_bridge_globals.engaged)
+		return;
+	kevin_bridge_globals.engaged = TRUE;
+	kevin_bridge_rule_fired("engaged", why, kevin_bot_unit_index());
+
+	return;
+}
+
+/* whether you fired since the last tick (a round gone from your weapon, or
+its trigger held) */
+static boolean kevin_bridge_you_fired(
+	void)
+{
+	long your_unit_index = kevin_bridge_your_unit();
+	struct unit_datum *you;
+	long weapon_index = NONE;
+	short rounds_loaded = NONE;
+	boolean fired;
+
+	if (kevin_bridge_globals.test_you_fired)
+	{
+		kevin_bridge_globals.test_you_fired = FALSE;
+		return TRUE;
+	}
+	if (your_unit_index == NONE)
+		return FALSE;
+	you = unit_get(your_unit_index);
+	if (you->unit.current_weapon_index >= 0 && you->unit.current_weapon_index < MAXIMUM_WEAPONS_PER_UNIT)
+		weapon_index = you->unit.weapon_object_indices[you->unit.current_weapon_index];
+	if (weapon_index != NONE)
+		rounds_loaded = weapon_get(weapon_index)->weapon.magazines[0].rounds_loaded;
+	fired = TEST_FLAG(you->unit.control_flags, _unit_control_weapon_primary_trigger_bit) ||
+		(weapon_index == kevin_bridge_globals.your_weapon_index && rounds_loaded < kevin_bridge_globals.your_rounds_loaded);
+	kevin_bridge_globals.your_weapon_index = weapon_index;
+	kevin_bridge_globals.your_rounds_loaded = rounds_loaded;
+
+	return fired;
+}
+
+static boolean kevin_bridge_is_grenade(
+	long definition_index)
+{
+	struct game_globals *game_globals = scenario_get_game_globals();
+	long index;
+
+	if (!game_globals)
+		return FALSE;
+	for (index = 0; index < game_globals->grenades.count; index++)
+	{
+		struct game_globals_grenade *grenade = TAG_BLOCK_GET_ELEMENT(&game_globals->grenades, index,
+			struct game_globals_grenade);
+
+		if (grenade->projectile.index != NONE && grenade->projectile.index == definition_index)
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+/* a grenade near him: he runs from it */
+static void kevin_bridge_rule_dive(
+	long kevin_unit_index)
+{
+	struct object_iterator iterator;
+	struct object_datum *object;
+	real_point3d kevin;
+
+	if (!kevin_bridge_globals.rule_dive || kevin_bridge_globals.dive_ticks > 0)
+		return;
+	object_get_origin(kevin_unit_index, &kevin);
+	object_iterator_new(&iterator, _object_mask_projectile, 0);
+	while ((object = object_iterator_next(&iterator)) != NULL)
+	{
+		real_point3d grenade;
+		real_vector2d way;
+
+		if (iterator.index == kevin_bridge_globals.dive_grenade_index || !kevin_bridge_is_grenade(object->definition_index))
+			continue;
+		object_get_origin(iterator.index, &grenade);
+		if (distance3d(&grenade, &kevin) > kevin_bridge_globals.dive_distance)
+			continue;
+		way.i = kevin.x - grenade.x;
+		way.j = kevin.y - grenade.y;
+		/* (one at his feet: back the way he faces) */
+		if (normalize2d(&way) == 0.f)
+		{
+			way.i = -unit_get(kevin_unit_index)->object.forward.i;
+			way.j = -unit_get(kevin_unit_index)->object.forward.j;
+			if (normalize2d(&way) == 0.f)
+				way.i = 1.f;
+		}
+		kevin_bridge_globals.dive_way = way;
+		kevin_bridge_globals.dive_ticks = KEVIN_DIVE_TICKS;
+		kevin_bridge_globals.dive_grenade_index = iterator.index;
+		kevin_bridge_rule_fired("grenade_dive", "Kevin ran from a grenade.", iterator.index);
+		return;
+	}
+
+	return;
+}
+
+/* the test's causes (debug.kevin_bridge_test) */
+static boolean kevin_bridge_test_stimulus(
+	char const *stimulus,
+	real_point3d const *point)
+{
+	long kevin_unit_index = kevin_bot_unit_index();
+	long your_unit_index = kevin_bridge_your_unit();
+
+	if (!strcmp(stimulus, "you_crouch") || !strcmp(stimulus, "you_stand"))
+	{
+		kevin_bridge_globals.test_you_crouch = !strcmp(stimulus, "you_crouch");
+		return TRUE;
+	}
+	if (!strcmp(stimulus, "you_fire"))
+	{
+		kevin_bridge_globals.test_you_fired = TRUE;
+		return TRUE;
+	}
+	if (!strcmp(stimulus, "you_to") && point && your_unit_index != NONE)
+	{
+		/* (you, dropped onto the ground below a point of the BSP loaded, for
+		walking into what the test is about) */
+		struct collision_result collision;
+		real_point3d from = *point;
+		real_vector3d down = { 0.f, 0.f, -20.f };
+		real_point3d ground;
+
+		from.z += 5.f;
+		if (!collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) | FLAG(_collision_test_structure_bit),
+			&from, &down, NONE, &collision))
+		{
+			return FALSE;
+		}
+		point_from_line3d(&from, &down, collision.t, &ground);
+		ground.z += 0.1f;
+		object_set_position(your_unit_index, &ground, NULL, NULL);
+		return TRUE;
+	}
+	if (kevin_unit_index == NONE || your_unit_index == NONE)
+		return FALSE;
+	if (!strcmp(stimulus, "you_hit_kevin"))
+	{
+		/* (as a round of yours does: a little of his shield or health, and
+		you as his latest attacker) */
+		struct unit_datum *kevin = unit_get(kevin_unit_index);
+		struct unit_attacker *attacker = &kevin->unit.attackers[0];
+
+		if (kevin->object.shield_vitality > 0.05f)
+			kevin->object.shield_vitality -= 0.05f;
+		else if (kevin->object.body_vitality > 0.05f)
+			kevin->object.body_vitality -= 0.02f;
+		else
+			return FALSE;
+		attacker->game_time_stamp = (unsigned long)game_time_get();
+		attacker->damage_inflicted = 0.05f;
+		attacker->object_index = your_unit_index;
+		attacker->player_index = local_player_get_player_index(0);
+		return TRUE;
+	}
+	if (!strcmp(stimulus, "grenade"))
+	{
+		struct game_globals *game_globals = scenario_get_game_globals();
+		struct game_globals_grenade *grenade;
+		struct object_placement_data placement_data;
+		long grenade_index;
+
+		if (!game_globals || game_globals->grenades.count <= 0 || kevin_bridge_globals.test_grenade_index != NONE)
+			return FALSE;
+		grenade = TAG_BLOCK_GET_ELEMENT(&game_globals->grenades, 0, struct game_globals_grenade);
+		if (grenade->projectile.index == NONE)
+			return FALSE;
+		object_placement_data_new(&placement_data, grenade->projectile.index, NONE);
+		object_get_origin(kevin_unit_index, &placement_data.position);
+		placement_data.position.x += 1.5f;
+		placement_data.position.z += 0.3f;
+		grenade_index = object_new(&placement_data);
+		if (grenade_index == NONE)
+			return FALSE;
+		kevin_bridge_globals.test_grenade_index = grenade_index;
+		kevin_bridge_globals.test_grenade_ticks = KEVIN_TEST_GRENADE_TICKS;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+/* tier 0's causes looked for, each tick, after the commands and the watch */
+static void kevin_bridge_rules_update(
+	void)
+{
+	long kevin_unit_index = kevin_bot_unit_index();
+
+	if (kevin_bridge_globals.test_grenade_index != NONE && --kevin_bridge_globals.test_grenade_ticks <= 0)
+	{
+		if (object_try_and_get(kevin_bridge_globals.test_grenade_index))
+			object_delete(kevin_bridge_globals.test_grenade_index);
+		kevin_bridge_globals.test_grenade_index = NONE;
+	}
+	if (kevin_bridge_you_fired())
+		kevin_bridge_rule_engage("You fired; Kevin fires as he likes.");
+	if (kevin_unit_index != NONE && kevin_bridge_globals.client && !kevin_bridge_globals.silent)
+		kevin_bridge_rule_dive(kevin_unit_index);
+
+	return;
+}
+
 /* ---------- private code: commands */
 
 static void kevin_bridge_command(
@@ -1103,6 +1449,105 @@ static void kevin_bridge_command(
 		}
 		kevin_bridge_globals.urgent_count = count;
 		kevin_bridge_send_result(id, TRUE, "urgent types set");
+		return;
+	}
+	if (!strcmp(type, "rules"))
+	{
+		boolean hostile = kevin_bridge_globals.rule_hostile;
+		long hits = kevin_bridge_globals.hostile_hits;
+		long window_ticks = kevin_bridge_globals.hostile_window_ticks;
+		long fire_ticks = kevin_bridge_globals.hostile_fire_ticks;
+		boolean dive = kevin_bridge_globals.rule_dive;
+		real dive_distance = kevin_bridge_globals.dive_distance;
+		boolean stealth = kevin_bridge_globals.rule_stealth;
+		boolean hold = kevin_bridge_globals.rule_hold_until_engaged;
+		double hits_value = (double)hits;
+		double window_value = (double)window_ticks / 30.0;
+		double fire_value = (double)fire_ticks / 30.0;
+		double distance_value = (double)dive_distance;
+		boolean hold_given = kevin_json_find(&json, 0, "hold_fire_until_engaged") != NONE;
+		long member_index;
+
+		/* (every member checked before any is taken) */
+		member_index = kevin_json_find(&json, 0, "hostile");
+		if (member_index != NONE &&
+			(json.tokens[member_index].type != _kevin_json_object ||
+				!kevin_bridge_member_boolean(&json, member_index, "on", &hostile) ||
+				!kevin_bridge_member_number(&json, member_index, "hits", 1.0, KEVIN_MAXIMUM_HITS, &hits_value) ||
+				!kevin_bridge_member_number(&json, member_index, "seconds", 0.1, 30.0, &window_value) ||
+				!kevin_bridge_member_number(&json, member_index, "fire_seconds", 0.1, 30.0, &fire_value)))
+		{
+			kevin_bridge_send_result(id, FALSE, "hostile is {on, hits 1-10, seconds and fire_seconds 0.1-30}");
+			return;
+		}
+		member_index = kevin_json_find(&json, 0, "grenade_dive");
+		if (member_index != NONE &&
+			(json.tokens[member_index].type != _kevin_json_object ||
+				!kevin_bridge_member_boolean(&json, member_index, "on", &dive) ||
+				!kevin_bridge_member_number(&json, member_index, "distance", 0.5, 10.0, &distance_value)))
+		{
+			kevin_bridge_send_result(id, FALSE, "grenade_dive is {on, distance 0.5-10}");
+			return;
+		}
+		if (!kevin_bridge_member_boolean(&json, 0, "stealth", &stealth) ||
+			!kevin_bridge_member_boolean(&json, 0, "hold_fire_until_engaged", &hold))
+		{
+			kevin_bridge_send_result(id, FALSE, "stealth and hold_fire_until_engaged are true or false");
+			return;
+		}
+		kevin_bridge_globals.rule_hostile = hostile;
+		kevin_bridge_globals.hostile_hits = (long)hits_value;
+		kevin_bridge_globals.hostile_window_ticks = (long)(window_value * 30.0);
+		kevin_bridge_globals.hostile_fire_ticks = (long)(fire_value * 30.0);
+		kevin_bridge_globals.rule_dive = dive;
+		kevin_bridge_globals.dive_distance = (real)distance_value;
+		kevin_bridge_globals.rule_stealth = stealth;
+		/* (set again, he holds his fire again) */
+		if (hold && hold_given)
+			kevin_bridge_globals.engaged = FALSE;
+		kevin_bridge_globals.rule_hold_until_engaged = hold;
+		if (!hostile)
+			kevin_bridge_globals.hostile_ticks = 0;
+		kevin_bridge_send_result(id, TRUE, "rules set");
+		return;
+	}
+	if (!strcmp(type, "set_hostile"))
+	{
+		boolean on = FALSE;
+
+		token_index = kevin_json_find(&json, 0, "on");
+		if (token_index != NONE && !kevin_json_get_boolean(&json, token_index, &on))
+		{
+			kevin_bridge_send_result(id, FALSE, "on is not true or false");
+			return;
+		}
+		kevin_bridge_globals.hostile_ticks = on ? kevin_bridge_globals.hostile_fire_ticks : 0;
+		kevin_bridge_send_result(id, TRUE, on ? "hostile" : "not hostile");
+		return;
+	}
+	if (!strcmp(type, "test") && config_boolean("debug.kevin_bridge_test"))
+	{
+		char stimulus[KEVIN_MAXIMUM_TYPE_LENGTH];
+
+		real_point3d point;
+		double x = 0.0, y = 0.0, z = 0.0;
+		long point_index = kevin_json_find(&json, 0, "point");
+		boolean has_point = point_index != NONE &&
+			kevin_json_get_number(&json, kevin_json_find(&json, point_index, "x"), &x) &&
+			kevin_json_get_number(&json, kevin_json_find(&json, point_index, "y"), &y) &&
+			kevin_json_get_number(&json, kevin_json_find(&json, point_index, "z"), &z) &&
+			x > -10000.0 && x < 10000.0 && y > -10000.0 && y < 10000.0 && z > -10000.0 && z < 10000.0;
+
+		point.x = (real)x;
+		point.y = (real)y;
+		point.z = (real)z;
+		if (!kevin_json_get_string(&json, kevin_json_find(&json, 0, "stimulus"), stimulus, sizeof(stimulus)) ||
+			!kevin_bridge_test_stimulus(stimulus, has_point ? &point : NULL))
+		{
+			kevin_bridge_send_result(id, FALSE, "no such stimulus, or none possible now");
+			return;
+		}
+		kevin_bridge_send_result(id, TRUE, "stimulus");
 		return;
 	}
 	if (!strcmp(type, "hearing"))
@@ -1269,6 +1714,12 @@ static void kevin_bridge_disconnect(
 	kevin_bridge_release("the sidecar is gone");
 	kevin_bridge_globals.hearing = FALSE;
 	kevin_bridge_voice_stop();
+	kevin_bridge_globals.rule_hostile = FALSE;
+	kevin_bridge_globals.rule_dive = FALSE;
+	kevin_bridge_globals.rule_stealth = FALSE;
+	kevin_bridge_globals.rule_hold_until_engaged = FALSE;
+	kevin_bridge_globals.test_you_crouch = NONE;
+	kevin_bridge_globals.test_you_fired = FALSE;
 
 	return;
 }
@@ -1302,6 +1753,14 @@ static void kevin_bridge_initialize(
 	kevin_bridge_globals.aim_object_index = NONE;
 	kevin_bridge_globals.kevin_unit_index = NONE;
 	kevin_bridge_globals.your_unit_index = NONE;
+	kevin_bridge_globals.hostile_hits = KEVIN_DEFAULT_HOSTILE_HITS;
+	kevin_bridge_globals.hostile_window_ticks = KEVIN_DEFAULT_HOSTILE_WINDOW_TICKS;
+	kevin_bridge_globals.hostile_fire_ticks = KEVIN_DEFAULT_HOSTILE_FIRE_TICKS;
+	kevin_bridge_globals.dive_distance = KEVIN_DEFAULT_DIVE_DISTANCE;
+	kevin_bridge_globals.dive_grenade_index = NONE;
+	kevin_bridge_globals.your_weapon_index = NONE;
+	kevin_bridge_globals.test_you_crouch = NONE;
+	kevin_bridge_globals.test_grenade_index = NONE;
 	if (!config_boolean("kevin.enabled"))
 		return;
 	port = config_integer("kevin.port");
@@ -1566,8 +2025,10 @@ static void kevin_bridge_append_unit(
 	kevin_bridge_append_object(message, size, length, "vehicle", unit->object.parent_object_index);
 	kevin_bridge_append(message, size, length, ",\"weapon\":");
 	kevin_bridge_append_string(message, size, length, kevin_bridge_tag_name(weapon_index));
-	kevin_bridge_append(message, size, length, ",\"rounds\":%d}",
-		weapon_index != NONE ? (int)weapon_get(weapon_index)->weapon.magazines[0].rounds_loaded : -1);
+	kevin_bridge_append(message, size, length, ",\"rounds\":%d,\"crouching\":%s,\"firing\":%s}",
+		weapon_index != NONE ? (int)weapon_get(weapon_index)->weapon.magazines[0].rounds_loaded : -1,
+		TEST_FLAG(unit->unit.control_flags, _unit_control_crouch_modifier_bit) ? "true" : "false",
+		TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit) ? "true" : "false");
 
 	return;
 }
@@ -1675,9 +2136,15 @@ static void kevin_bridge_watch(
 				shield, body, lost);
 			kevin_bridge_append_object(fields, sizeof(fields), &fields_length, "attacker", attacker_index);
 			if (attacker_player_index != NONE && attacker_player_index == local_player_get_player_index(0))
+			{
 				kevin_bridge_event("player_shot_kevin", "You shot Kevin.", kevin_unit_index, FALSE, fields);
+				kevin_bridge_rule_hit_by_you();
+			}
 			else
+			{
 				kevin_bridge_event("kevin_damaged", "Kevin was hit.", kevin_unit_index, FALSE, fields);
+				kevin_bridge_rule_engage("Kevin was hit; he fires as he likes.");
+			}
 		}
 		kevin_bridge_globals.kevin_body = body;
 		kevin_bridge_globals.kevin_shield = shield;
@@ -1722,6 +2189,7 @@ void kevin_bridge_update(
 	kevin_bridge_hear();
 	kevin_bridge_speak();
 	kevin_bridge_watch();
+	kevin_bridge_rules_update();
 	if (++kevin_bridge_globals.event_ticks >= KEVIN_EVENT_TICKS)
 		kevin_bridge_flush_events();
 	if (kevin_bridge_globals.client && ++kevin_bridge_globals.state_ticks >= KEVIN_STATE_TICKS)
@@ -1741,6 +2209,14 @@ boolean kevin_bridge_look_target(
 	real_point3d eye;
 	real_point3d point;
 
+	/* (firing back: at your head) */
+	if (kevin_bridge_globals.hostile_ticks > 0 && kevin_bridge_your_unit() != NONE)
+	{
+		unit_get_head_position(kevin_bridge_your_unit(), &point);
+		unit_get_camera_position(unit_index, &eye);
+		vector_from_points3d(&eye, &point, target);
+		return magnitude_squared3d(target) > 0.f;
+	}
 	if (kevin_bridge_globals.aim == _kevin_aim_none)
 		return FALSE;
 	if (kevin_bridge_globals.aim_ticks <= 0)
@@ -1782,7 +2258,6 @@ void kevin_bridge_adjust_control(
 	short flag;
 	long index;
 
-	(void)unit_index;
 	for (flag = 0; flag < NUMBER_OF_UNIT_CONTROL_FLAGS; flag++)
 	{
 		if (kevin_bridge_globals.press_ticks[flag] > 0)
@@ -1792,11 +2267,50 @@ void kevin_bridge_adjust_control(
 		}
 	}
 	flags |= kevin_bridge_globals.hold_flags;
+
+	/* tier 0: in stealth, he crouches as you do */
+	if (kevin_bridge_globals.rule_stealth)
+	{
+		long your_unit_index = kevin_bridge_your_unit();
+		boolean crouching = kevin_bridge_globals.test_you_crouch != NONE
+			? kevin_bridge_globals.test_you_crouch
+			: your_unit_index != NONE &&
+				TEST_FLAG(unit_get(your_unit_index)->unit.control_flags, _unit_control_crouch_modifier_bit);
+
+		if (crouching && !kevin_bridge_globals.stealth_crouching)
+			kevin_bridge_rule_fired("stealth_crouch", "You crouched; so did Kevin.", unit_index);
+		kevin_bridge_globals.stealth_crouching = crouching;
+		if (crouching)
+			flags |= FLAG(_unit_control_crouch_modifier_bit);
+	}
 	control_data->control_flags |= (word)flags;
-	if (kevin_bridge_globals.hold_fire)
+	if (kevin_bridge_globals.hostile_ticks > 0)
+	{
+		/* (firing back: held through any hold fire) */
+		kevin_bridge_globals.hostile_ticks--;
+		control_data->control_flags |= (word)FLAG(_unit_control_weapon_primary_trigger_bit);
+		control_data->primary_trigger = 1.f;
+	}
+	else if (kevin_bridge_globals.hold_fire ||
+		(kevin_bridge_globals.rule_hold_until_engaged && !kevin_bridge_globals.engaged))
 	{
 		control_data->control_flags &= (word)~(FLAG(_unit_control_weapon_primary_trigger_bit) |
 			FLAG(_unit_control_weapon_secondary_trigger_bit) | FLAG(_unit_control_throw_grenade_bit));
+		control_data->primary_trigger = 0.f;
+	}
+	/* a run from a grenade: his body turned the way away, full ahead, and in
+	the combat stance (in the AI's alert one a biped only walks, and can't back
+	away or step aside: bipeds.c) */
+	if (kevin_bridge_globals.dive_ticks > 0)
+	{
+		kevin_bridge_globals.dive_ticks--;
+		control_data->animation_state = _unit_animation_state_in_combat;
+		control_data->facing_vector.i = kevin_bridge_globals.dive_way.i;
+		control_data->facing_vector.j = kevin_bridge_globals.dive_way.j;
+		control_data->facing_vector.k = 0.f;
+		control_data->throttle.i = 1.f;
+		control_data->throttle.j = 0.f;
+		control_data->throttle.k = 0.f;
 	}
 
 	/* the commands waiting for this tick */

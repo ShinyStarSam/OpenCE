@@ -393,7 +393,11 @@ Sidecar → game:
 - Tasks (command lists or AI scripting): `move_to` {point | object id},
   `follow`, `wait_here`, `attack` {target}, `grenade` {target},
   `enter_vehicle` {vehicle, seat}, `exit_vehicle`, `set_hostile` on/off
-- `rules`: tier-0 rule parameters; `policy`: obedient / grumpy /
+- `rules` {hostile {on, hits, seconds, fire_seconds}, grenade_dive {on,
+  distance}, stealth, hold_fire_until_engaged}: tier 0's parameters, each
+  member optional and all checked before any is taken; `set_hostile` {on}
+  ends (or starts) his firing back; `test` {stimulus} with
+  `debug.kevin_bridge_test`, for the scripted check; `policy`: obedient / grumpy /
   refusing / hostile
 - `tuning` {any combat tuning setting}, `preset` {name}
 - `teleport_near_player`, `release` (hand Kevin back to the game AI)
@@ -601,7 +605,7 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 | M0 | **Done.** Kevin as an AI-driven Spartan (`kevin_bot.c`): made behind you, made again after he dies, following, look and aim, combat and weapon choice, brought back when stuck; his view drawn off screen on request (`kevin_view.c`). (A first version made him co-op player 2; see "Kevin is a Spartan") | Kevin, armed, follows you through the a30 opening while you play, gets into the Warthog's gun seat, comes back after dying; frames of his view arrive with no cost to yours |
 | M1 | **Done.** `kevin_bridge.c`: settings, socket read every tick, framing, `state`, events with `kevin_in_range` / `kevin_saw` / `kevin_did`, batches and `urgent` types, checkpoint ids, the control overlay hook, `applied` timestamps and `action_result`, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI (met: `applied` on the next tick, p50 16 ms, p95 32 ms over 20 tries at 60 fps; silence and a closed socket both hand him back; `kevin/tools/m1_bridge_test.py`) |
 | M2 | **Done.** **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries (met: in the game at 60 fps, jump p50 62 ms, p95 149 ms after speech ends; the bark the same; 20 of 20 commands right, questions and "don't" left alone; `kevin/tools/m2_reflex_test.py`, speech from Windows' voices given to the hearing, so the microphone's own delay of about a tick isn't counted) |
-| M3 | Kevin across level loads, BSP switches and checkpoint reverts (made again or moved to the new BSP's encounter), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test |
+| M3 | **Done.** Kevin across level loads, BSP switches and checkpoint reverts (made again or moved to the new BSP's encounter), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test (met: `kevin/tools/m3_rules_test.py` in the game, each `reflex_fired` on its cause's tick, none with the rules off; he fires back and crouches in `state`, and runs from grenades, seen in play. Across a30's BSP switch both ways, `kevin/tools/m3_bsp_test.py`: he joined an encounter of the new BSP and was beside you after it) |
 | M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
 | M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
 | M6 | Keeping up: stuck detection, catch-up teleport, scripted moves, cutscene events | Kevin is beside you after every cutscene and Pelican drop through a30 and a50 |
@@ -615,9 +619,13 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 
 ## Open questions
 
-- **His encounter after a BSP switch** (M3): whether the first
-  encounter on the new BSP takes him, or the bridge needs an encounter of
-  its own.
+- **His encounter after a BSP switch** (M3): he's moved to the first
+  encounter of the new BSP with squads, when his is on the old one (seen
+  on a30). Levels with many BSPs (a10) still to be played through.
+- **Where he is put:** only on your trail, where you stood (M3). a30's
+  start has ground behind you inside a rock that the game's collision tests
+  find no wall in, so the level's ground is no proof of room; he isn't made
+  until you've walked a little.
 - **Shooting Kevin:** whether the AI turns on you after friendly fire, as
   marines do, before tier 0's own betrayal rule; tier 0 should decide.
 - **Weapon spread at 100 accuracy:** where the weapon's own error is

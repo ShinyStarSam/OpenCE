@@ -26,7 +26,11 @@ imperative's action as soon as the word appears (`reflex/keywords.py`:
 jump, get down, stand up, hold fire, open fire, reload, grenade,
 flashlight, swap weapons, stop), and leaves questions and "don't" to the
 brain; Kevin acknowledges with a bark from the cache (`speech/barks.py`).
-Talking over him cuts him off. Each reflex's stages are timed into
+Talking over him cuts him off. Tier 0 runs in the game (`RULES` in
+`kevin.py`): he fires back for 3 seconds after two hits by you within 3,
+and runs from a grenade within 3 units; "stealth mode" has him crouch when
+you do and hold his fire until you fire, "go loud" ends it, and "calm down"
+or "sorry" stops his firing back. Each reflex's stages are timed into
 `logs/latency-*.jsonl`, and p50 / p95 are printed on exit.
 
 The barks are made by `kevin/tools/make_barks.py`, in Kevin's voice with
@@ -40,6 +44,22 @@ speech made by Windows' voices:
 ```bash
 python kevin/tools/m2_reflex_test.py            # against the game
 python kevin/tools/m2_reflex_test.py --fake     # against the fake game
+```
+
+M3's check, each of tier 0's rules firing on the tick of its cause (the
+game started with `HALO_KEVIN_BRIDGE_TEST=1`; walk a few steps so Kevin is
+made):
+
+```bash
+python kevin/tools/m3_rules_test.py             # against the game
+python kevin/tools/m3_rules_test.py --fake      # against the fake game
+```
+
+And Kevin across a BSP switch, with you walking: it puts you a little
+before the level's switch and checks on him after it:
+
+```bash
+python kevin/tools/m3_bsp_test.py
 ```
 
 ## The fake game

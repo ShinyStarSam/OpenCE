@@ -42,6 +42,7 @@ does with his unit.
 #include "items/weapons.h"
 #include "objects/objects.h"
 #include "physics/collision_bsp.h"
+#include "physics/collisions.h"
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "tag_files/tag_files.h"
@@ -86,12 +87,19 @@ the AI's firing positions within KEVIN_FOLLOW_FIRING_RADIUS of you */
 #define KEVIN_FOLLOW_FIRING_RADIUS 6.f
 /* how far you move before his destination is moved to you */
 #define KEVIN_FOLLOW_RETARGET 1.5f
-/* how far from you, staying put, he is brought to you; how far behind you,
-and above the ground (world units); ticks outside the level before he is */
+/* how far from you, staying put, he is brought to you; how far behind you
+at least (world units); ticks outside the level before he is */
 #define KEVIN_STRANDED_DISTANCE 10.f
 #define KEVIN_BROUGHT_BEHIND 1.5f
-#define KEVIN_BROUGHT_ABOVE 0.05f
 #define KEVIN_OUTSIDE_TICKS 3
+/* you moved this far in a tick (not in a vehicle): a script moved you, and
+he is brought along */
+#define KEVIN_YOU_TELEPORTED_DISTANCE 8.f
+/* your trail: where you stood on the ground, a point each this far (world
+units), the latest kept; he is put on it, as a body of yours fitted there,
+no nearer you than KEVIN_BROUGHT_BEHIND and no further than this */
+#define KEVIN_TRAIL_SPACING 0.5f
+#define KEVIN_TRAIL_FURTHEST 6.f
 
 /* the AI takes cover only at its encounter's firing positions: he joins
 the encounter of his team with the most of them this near you, looked for
@@ -208,6 +216,21 @@ enum
 
 /* ---------- globals */
 
+enum
+{
+	KEVIN_TRAIL_POINTS = 32,
+};
+
+/* seeing a point: what faces you */
+#define KEVIN_SIGHT_FLAGS (FLAG(_collision_test_front_facing_surfaces_bit) | FLAG(_collision_test_structure_bit) | \
+	FLAG(_collision_test_objects_bit) | FLAG(_collision_test_objects_vehicles_bit) | \
+	FLAG(_collision_test_objects_scenery_bit) | FLAG(_collision_test_objects_machines_bit))
+/* only the objects (a vehicle parked on your trail since) */
+#define KEVIN_OBJECT_ROOM_FLAGS (FLAG(_collision_test_front_facing_surfaces_bit) | \
+	FLAG(_collision_test_back_facing_surfaces_bit) | FLAG(_collision_test_objects_bit) | \
+	FLAG(_collision_test_objects_vehicles_bit) | FLAG(_collision_test_objects_scenery_bit) | \
+	FLAG(_collision_test_objects_machines_bit))
+
 static struct
 {
 	boolean active;              /* this game has Kevin */
@@ -258,6 +281,20 @@ static struct
 	short last_rounds_loaded;
 	short shots;
 	long outside_ticks;          /* ticks he has been outside the level */
+
+	/* your trail (KEVIN_TRAIL_SPACING), its oldest first from trail_first */
+	real_point3d trail[KEVIN_TRAIL_POINTS];
+	long trail_first;
+	long trail_count;
+
+	/* the level moving you: the structure BSP he last knew, where you were a
+	tick ago, a cutscene playing, and why he is to be brought to you on the
+	next tick there is ground behind you (NULL: he isn't) */
+	short structure_bsp_index;
+	boolean your_position_valid;
+	real_point3d your_position;
+	boolean cinematic;
+	char const *bring_why;
 
 	/* what your log needs */
 	long your_last_weapon_index;
@@ -647,44 +684,116 @@ static void kevin_bot_take_cover_near_you(
 	return;
 }
 
-/* where he can stand behind you: on the ground you stand on, walked
-along it from under you (so never inside a slope or past a wall), as high
-above it as you are */
+/* whether a body of your size has room at a point (where your origin would
+be), against the flags' surfaces, and you can see it from your middle */
+static boolean kevin_bot_room_at(
+	long your_unit_index,
+	real_point3d const *point,
+	unsigned long room_flags)
+{
+	struct collision_result collision;
+	real_point3d base;
+	real_point3d yours;
+	real_point3d your_origin;
+	real_point3d middle;
+	real_vector3d pill;
+	real_vector3d to_middle;
+	real height;
+	real width;
+
+	biped_get_physics_pill(your_unit_index, &yours, &height, &width);
+	object_get_origin(your_unit_index, &your_origin);
+	/* (the pill's base as far above the point as yours is above you) */
+	base = *point;
+	base.z += yours.z - your_origin.z;
+	scale_vector3d(global_up3d, height, &pill);
+	if (collision_test_pill(room_flags, &base, &pill, width, your_unit_index, &collision))
+		return FALSE;
+	yours.z += 0.5f * height;
+	middle = base;
+	middle.z += 0.5f * height;
+	vector_from_points3d(&yours, &middle, &to_middle);
+	return !collision_test_vector(KEVIN_SIGHT_FLAGS, &yours, &to_middle, your_unit_index, &collision);
+}
+
+/* where you stand, added to your trail; the trail let go of when you were
+moved (a teleport, another BSP) */
+static void kevin_bot_note_your_trail(
+	void)
+{
+	long your_unit_index = kevin_bot_player_unit(0);
+	struct biped_datum *biped = your_unit_index != NONE ? biped_try_and_get(your_unit_index) : NULL;
+	real_point3d yours;
+	real_point3d const *last;
+
+	if (!biped ||
+		TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ||
+		biped->object.parent_object_index != NONE ||
+		biped->object.location.cluster_index == NONE ||
+		TEST_FLAG(biped->biped.flags, _biped_airborne_bit))
+	{
+		return;
+	}
+	object_get_origin(your_unit_index, &yours);
+	last = kevin_bot_globals.trail_count
+		? &kevin_bot_globals.trail[(kevin_bot_globals.trail_first + kevin_bot_globals.trail_count - 1) % KEVIN_TRAIL_POINTS]
+		: NULL;
+	if (last && distance3d(last, &yours) < KEVIN_TRAIL_SPACING)
+		return;
+	if (last && distance3d(last, &yours) > KEVIN_YOU_TELEPORTED_DISTANCE)
+		kevin_bot_globals.trail_count = 0;
+	if (kevin_bot_globals.trail_count == KEVIN_TRAIL_POINTS)
+	{
+		kevin_bot_globals.trail_first = (kevin_bot_globals.trail_first + 1) % KEVIN_TRAIL_POINTS;
+		kevin_bot_globals.trail_count--;
+	}
+	kevin_bot_globals.trail[(kevin_bot_globals.trail_first + kevin_bot_globals.trail_count) % KEVIN_TRAIL_POINTS] = yours;
+	kevin_bot_globals.trail_count++;
+
+	return;
+}
+
+/* the latest point of your trail far enough behind you that you can see,
+with no object come there since */
+static boolean kevin_bot_on_your_trail(
+	long your_unit_index,
+	real_point3d *point)
+{
+	real_point3d yours;
+	long index;
+
+	object_get_origin(your_unit_index, &yours);
+	for (index = kevin_bot_globals.trail_count - 1; index >= 0; index--)
+	{
+		real_point3d const *trail = &kevin_bot_globals.trail[(kevin_bot_globals.trail_first + index) % KEVIN_TRAIL_POINTS];
+		real distance = distance3d(trail, &yours);
+
+		if (distance < KEVIN_BROUGHT_BEHIND)
+			continue;
+		if (distance > KEVIN_TRAIL_FURTHEST)
+			break;
+		if (kevin_bot_room_at(your_unit_index, trail, KEVIN_OBJECT_ROOM_FLAGS))
+		{
+			*point = *trail;
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
+/* where he is put near you: on your trail behind you, where a body of
+yours fitted (the level's own ground is no proof: a30's start has ground
+behind you inside a rock that its collision tests find no wall in); none
+until you've walked a little */
 static boolean kevin_bot_ground_behind_you(
 	long your_unit_index,
 	real_point3d *point)
 {
-	struct unit_datum *you = unit_get(your_unit_index);
-	long your_surface_index;
-	long surface_index;
-	real_point3d your_ground;
-	real_point3d your_origin;
-	real_point2d from;
-	real_point2d want;
-
 	if (!biped_try_and_get(your_unit_index))
 		return FALSE;
-	your_surface_index = biped_find_pathfinding_surface_index(your_unit_index, &your_ground);
-	if (your_surface_index == NONE)
-		return FALSE;
-	object_get_origin(your_unit_index, &your_origin);
 
-	from.x = your_ground.x;
-	from.y = your_ground.y;
-	want.x = your_ground.x - you->object.forward.i * KEVIN_BROUGHT_BEHIND;
-	want.y = your_ground.y - you->object.forward.j * KEVIN_BROUGHT_BEHIND;
-	surface_index = structure_surface_index_from_point(
-		global_structure_bsp_get(),
-		FALSE,
-		&from,
-		your_surface_index,
-		&want);
-	if (surface_index == NONE)
-		return FALSE;
-	collision_surface_project_point2d(global_collision_bsp_get(), surface_index, _z, TRUE, &want, point);
-	point->z += your_origin.z - your_ground.z + KEVIN_BROUGHT_ABOVE;
-
-	return TRUE;
+	return kevin_bot_on_your_trail(your_unit_index, point);
 }
 
 /* puts him behind you; FALSE when there is no ground there for him (you
@@ -746,6 +855,114 @@ static void kevin_bot_bring_back_stranded(
 	if (++kevin_bot_globals.stranded_ticks < KEVIN_STRANDED_TICKS)
 		return;
 	kevin_bot_bring_to_you(unit_index, "stuck away from you");
+
+	return;
+}
+
+/* the level moving you: a structure BSP switch (his encounter moved to one
+of the new BSP, as only those are updated, and he is brought to you), a
+script moving you far in a tick, and a cutscene's end (he is brought to you
+if he's far) */
+static void kevin_bot_follow_the_level(
+	long unit_index)
+{
+	long your_unit_index = kevin_bot_player_unit(0);
+	boolean cinematic = cinematic_in_progress();
+	struct unit_datum *unit = unit_index != NONE ? unit_get(unit_index) : NULL;
+
+	if (global_structure_bsp_index != kevin_bot_globals.structure_bsp_index)
+	{
+		char fields[64];
+		short old_index = kevin_bot_globals.structure_bsp_index;
+
+		kevin_bot_globals.structure_bsp_index = global_structure_bsp_index;
+		kevin_bot_globals.trail_count = 0;
+		snprintf(fields, sizeof(fields), "\"from\":%d,\"to\":%d", old_index, global_structure_bsp_index);
+		kevin_bridge_event("bsp_switch", "The level switched to another part of itself.", NONE, FALSE, fields);
+		error(_error_silent, "kevin: structure bsp %d to %d", old_index, global_structure_bsp_index);
+		if (old_index != NONE && unit && unit->unit.actor_index != NONE)
+		{
+			struct actor_datum *actor = actor_get(unit->unit.actor_index);
+			long current_index = actor->meta.encounter_index == NONE
+				? NONE
+				: DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index);
+			struct encounter_definition *current = current_index != NONE
+				? TAG_BLOCK_GET_ELEMENT(&global_scenario_get()->ai_encounters, current_index, struct encounter_definition)
+				: NULL;
+
+			if (!current ||
+				(current->runtime_structure_bsp_reference_index != NONE &&
+					current->runtime_structure_bsp_reference_index != global_structure_bsp_index))
+			{
+				long encounter_index = kevin_bot_find_encounter();
+
+				if (encounter_index != NONE)
+				{
+					actor_change_encounter(unit->unit.actor_index, encounter_index, 0);
+					encounter_get(encounter_index)->force_active = TRUE;
+					kevin_bot_globals.encounter_index = encounter_index;
+					kevin_bot_globals.encounter_ticks = 0;
+					error(_error_silent, "kevin: joined encounter %ld of the new structure bsp", encounter_index);
+				}
+			}
+		}
+		/* (only when he's far from you, or outside the new BSP: he usually
+		walks across with you) */
+		if (old_index != NONE && unit && your_unit_index != NONE)
+		{
+			real_point3d position;
+			real_point3d yours;
+
+			object_get_origin(unit_index, &position);
+			object_get_origin(your_unit_index, &yours);
+			if (unit->object.location.cluster_index == NONE || distance3d(&position, &yours) > KEVIN_STRANDED_DISTANCE)
+				kevin_bot_globals.bring_why = "the level moved you";
+		}
+	}
+
+	if (your_unit_index != NONE)
+	{
+		real_point3d yours;
+
+		object_get_origin(your_unit_index, &yours);
+		if (kevin_bot_globals.your_position_valid &&
+			unit_get(your_unit_index)->object.parent_object_index == NONE &&
+			distance3d(&yours, &kevin_bot_globals.your_position) > KEVIN_YOU_TELEPORTED_DISTANCE)
+		{
+			kevin_bot_globals.bring_why = "you were moved";
+		}
+		kevin_bot_globals.your_position = yours;
+		kevin_bot_globals.your_position_valid = TRUE;
+	}
+	else
+	{
+		kevin_bot_globals.your_position_valid = FALSE;
+	}
+
+	if (cinematic != kevin_bot_globals.cinematic)
+	{
+		kevin_bot_globals.cinematic = cinematic;
+		kevin_bridge_event(cinematic ? "cinematic_start" : "cinematic_end",
+			cinematic ? "A cutscene started." : "The cutscene ended.", NONE, FALSE, NULL);
+		if (!cinematic && unit && your_unit_index != NONE)
+		{
+			real_point3d position;
+			real_point3d yours;
+
+			object_get_origin(unit_index, &position);
+			object_get_origin(your_unit_index, &yours);
+			if (distance3d(&position, &yours) > KEVIN_STRANDED_DISTANCE)
+				kevin_bot_globals.bring_why = "after the cutscene";
+		}
+	}
+
+	/* (not while a cutscene plays, nor in a vehicle: on the next tick with
+	ground behind you) */
+	if (kevin_bot_globals.bring_why && unit && !cinematic && unit->object.parent_object_index == NONE &&
+		kevin_bot_bring_to_you(unit_index, kevin_bot_globals.bring_why))
+	{
+		kevin_bot_globals.bring_why = NULL;
+	}
 
 	return;
 }
@@ -1761,6 +1978,50 @@ void kevin_bot_set_talking(
 	return;
 }
 
+/* the level's structure BSPs, and where it switches between them, for
+checking that he follows you across */
+static void kevin_bot_log_bsp_switches(
+	void)
+{
+	struct scenario *scenario = global_scenario_get();
+	long index;
+
+	error(_error_silent, "kevin: the level has %ld structure bsps, %ld bsp switch trigger volumes",
+		scenario->structure_bsp_references.count, scenario->bsp_switch_trigger_volumes.count);
+	for (index = 0; index < scenario->bsp_switch_trigger_volumes.count; index++)
+	{
+		struct scenario_bsp_switch_trigger_volume_record
+		{
+			short trigger_volume_index;
+			short source_structure_bsp_index;
+			short destination_structure_bsp_index;
+			short cutscene_flag_index;
+		} *record = TAG_BLOCK_GET_ELEMENT(&scenario->bsp_switch_trigger_volumes, index,
+			struct scenario_bsp_switch_trigger_volume_record);
+		struct scenario_trigger_volume *volume;
+
+		if (record->trigger_volume_index < 0 || record->trigger_volume_index >= scenario->trigger_volumes.count)
+			continue;
+		volume = TAG_BLOCK_GET_ELEMENT(&scenario->trigger_volumes, record->trigger_volume_index,
+			struct scenario_trigger_volume);
+		{
+			real_vector3d left;
+			real_point3d centre = volume->position;
+
+			cross_product3d(&volume->up, &volume->forward, &left);
+			point_from_line3d(&centre, &volume->forward, 0.5f * volume->extents.i, &centre);
+			point_from_line3d(&centre, &left, 0.5f * volume->extents.j, &centre);
+			point_from_line3d(&centre, &volume->up, 0.5f * volume->extents.k, &centre);
+			error(_error_silent, "kevin: bsp switch %ld (%s) from %d to %d, centre %.1f %.1f %.1f, forward %.2f %.2f, extents %.1f %.1f %.1f",
+				index, volume->name, record->source_structure_bsp_index, record->destination_structure_bsp_index,
+				centre.x, centre.y, centre.z, volume->forward.i, volume->forward.j,
+				volume->extents.i, volume->extents.j, volume->extents.k);
+		}
+	}
+
+	return;
+}
+
 void kevin_bot_game_begin(
 	void)
 {
@@ -1775,14 +2036,28 @@ void kevin_bot_game_begin(
 	kevin_bot_globals.glance_ticks = KEVIN_GLANCE_INTERVAL_MINIMUM;
 	kevin_bot_globals.talking_ticks = 0;
 	kevin_bot_globals.random_seed = 0x4B455649UL;
+	kevin_bot_globals.structure_bsp_index = NONE;
+	kevin_bot_globals.trail_count = 0;
+	kevin_bot_globals.your_position_valid = FALSE;
+	kevin_bot_globals.cinematic = FALSE;
+	kevin_bot_globals.bring_why = NULL;
 	if (config_boolean("kevin.enabled") &&
 		global_scenario_get()->type == _scenario_type_solo &&
 		player_spawn_count == 1)
 	{
 		kevin_bot_globals.active = TRUE;
 		error(_error_silent, "kevin: this level has Kevin");
+		kevin_bot_log_bsp_switches();
 	}
 	kevin_bridge_new_generation("a level started");
+	{
+		char fields[128];
+
+		snprintf(fields, sizeof(fields), "\"level\":\"%s\",\"kevin\":%s",
+			global_scenario_index != NONE ? tag_name_strip_path(tag_get_name(global_scenario_index)) : "",
+			kevin_bot_globals.active ? "true" : "false");
+		kevin_bridge_event("level_loaded", "A level started.", NONE, FALSE, fields);
+	}
 
 	return;
 }
@@ -1802,6 +2077,11 @@ void kevin_bot_update(
 	if (!kevin_bot_globals.active || !ai_globals->ai_initialized_for_map)
 		return;
 	unit_index = kevin_bot_unit();
+	kevin_bot_note_your_trail();
+	kevin_bot_follow_the_level(
+		unit_index != NONE && !TEST_FLAG(unit_get(unit_index)->object.damage_flags, _object_dead_bit)
+			? unit_index
+			: NONE);
 	if (unit_index != NONE && !TEST_FLAG(unit_get(unit_index)->object.damage_flags, _object_dead_bit))
 	{
 		kevin_bot_globals.dead_ticks = 0;
