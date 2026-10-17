@@ -167,6 +167,8 @@ symbols in this file:
 
 #include "math/real_math_declarations.h"
 
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, kevin.enabled's companion */
+
 /* ---------- constants */
 
 enum
@@ -613,6 +615,8 @@ static void actor_start_pause(
 	{
 		burst_separation *= 1.7f;
 	}
+	/* port: Kevin pauses less between bursts (kevin.enabled) */
+	burst_separation *= kevin_bot_fire_scale(actor_index, KEVIN_FIRE_BURST_SEPARATION);
 
 	actor->control.fire_state_timer = (short)(burst_separation*TICKS_PER_SECOND);
 
@@ -648,6 +652,8 @@ static boolean actor_start_first_burst_delay(
 		actor->control.fire_state_timer = (short)(actor_combat_real_random_range_inline(
 			firing_variant_definition->ranged_combat.first_burst_delay_lower_bound,
 			firing_variant_definition->ranged_combat.first_burst_delay_upper_bound)*
+			/* port: and opens fire sooner (kevin.enabled) */
+			kevin_bot_fire_scale(actor_index, KEVIN_FIRE_FIRST_BURST_DELAY)*
 			TICKS_PER_SECOND);
 	}
 
@@ -1260,6 +1266,8 @@ static void actor_start_burst(
 			{
 				burst_duration *= 0.6f;
 			}
+			/* port: and fires longer bursts (kevin.enabled) */
+			burst_duration *= kevin_bot_fire_scale(actor_index, KEVIN_FIRE_BURST_DURATION);
 		}
 		actor->control.fire_state_timer = (short)(burst_duration*TICKS_PER_SECOND);
 	}
@@ -1719,6 +1727,8 @@ void actor_combat_update(
 	actor->control.weapon_maximum_range = actor_has_ranged_weapon(actor_index) ?
 		firing_variant_definition->ranged_combat.maximum_firing_range :
 		0.0f;
+	/* port: Kevin fires as far as his weapon reaches (kevin.enabled) */
+	actor->control.weapon_maximum_range = kevin_bot_maximum_firing_range(actor_index, actor->control.weapon_maximum_range);
 
 	if (actor->orders.combat.throw_grenade)
 	{

@@ -234,6 +234,8 @@ symbols in this file:
 #include "objects/object_types.h"
 #include "objects/objects.h"
 #include "physics/collision_model_definitions.h"
+
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, kevin.enabled's companion */
 #undef PATH_EXTERNAL_FLEE_ROUTINES
 #undef REAL_MATH_EXTERNAL_POINT_FROM_LINE3D
 
@@ -2329,6 +2331,10 @@ boolean actor_move_to_firing_position(
 
 	actor_set_dormant(actor_index, FALSE);
 
+	/* port: Kevin keeps with you rather than going to a firing position away from you (kevin.enabled) */
+	if (kevin_bot_move_to_you(actor_index, firing_position_index, &result))
+		return result;
+
 	if (actor->control.path.destination_orders.destination_type != _destination_firing_position ||
 		actor->control.path.destination_orders.firing_position_index != firing_position_index)
 	{
@@ -3167,6 +3173,12 @@ void actor_move_update(
 			}
 		}
 	}
+	/* port: Kevin runs as a player does, not at an alert or sleeping actor's walk (kevin.enabled) */
+	if ((movement_type == _actor_movement_type_alert || movement_type == _actor_movement_type_asleep) &&
+		kevin_bot_drives_unit(actor->meta.unit_index))
+	{
+		movement_type = _actor_movement_type_combat;
+	}
 	actor->output.movement_type = movement_type;
 
 	override_facing = actor->orders.move.override_movement_facing;
@@ -3373,6 +3385,12 @@ void actor_move_update(
 			if (actor->control.moving_forced_by_aiming)
 				free_movement_distance_squared *= 4.f;
 		}
+	}
+	/* port: Kevin moves any way from where he faces, as a player does (kevin.enabled) */
+	if (kevin_bot_moves_freely(actor_index))
+	{
+		free_movement = TRUE;
+		free_movement_distance_squared = REAL_MAX;
 	}
 
 	if (actor->control.moving && !actor->control.movement_complete)

@@ -275,6 +275,8 @@ symbols in this file:
 #include "units/vehicles.h"
 #include "units/biped_definitions.h"
 
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, kevin.enabled's companion */
+
 /* ---------- constants */
 
 enum
@@ -2218,10 +2220,13 @@ range_weight_done:
 		(knowledge_weight + range_weight);
 
 	/* Preserve January's swapped target/distance scale constants. */
-	return
+	/* port: Kevin prefers the enemy you aim at and those near you (kevin.enabled) */
+	return kevin_bot_target_weight(
+		actor_index,
+		prop->unit_index,
 		weights.target_weight * 10.0f +
 		(5.0f / (prop->distance * 0.1f + 1.0f) +
-			weights.bonus_weight);
+			weights.bonus_weight));
 }
 
 

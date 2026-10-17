@@ -402,6 +402,7 @@ symbols in this file:
 #include "tag_files/files.h"
 #include "custom_edition_cache.h" /* port: custom_edition_level_name */
 #include "view_fov.h" /* port: display.fov, before the projection and culling */
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, kevin.enabled's second player */
 
 #if defined(HALO_WINDOWS) || defined(HALO_ANDROID) || defined(__linux__)
 #define HALO_NATIVE_BUILD_INFO 1
@@ -805,6 +806,8 @@ static void create_local_players(
 			"c:\\halo\\SOURCE\\main\\main.c",
 			741,
 			game_connection() == _game_connection_local);
+		/* port: with kevin.enabled, a campaign level gets a second player, Kevin */
+		kevin_bot_set_player_count();
 		for (i = 0; i < player_spawn_count; i++)
 		{
 			gamepad_index =

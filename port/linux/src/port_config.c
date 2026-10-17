@@ -309,6 +309,14 @@ static const struct config_setting config_settings[] =
 		"as CUSTOM SINGLEPLAYER and CUSTOM MULTIPLAYER. Their tags are checked\n"
 		"as the game's own maps' are before they run; false refuses them\n"
 		"(docs/custom_edition_caches.md)." },
+	{ "kevin.enabled", _config_boolean, "false", "HALO_KEVIN", _environment_set_is_true, _platform_desktop,
+		"Kevin, an AI companion: a campaign level played on this computer starts\n"
+		"as co-op, and the second player is Kevin, a Spartan driven by the\n"
+		"game's AI (kevin_bot.c). A prototype; false plays the campaign alone." },
+	{ "kevin.actor_variant", _config_string, "\"marine_armored assault rifle\"", "HALO_KEVIN_ACTOR_VARIANT",
+		_environment_value, _platform_desktop,
+		"The AI that drives Kevin: the first actor variant of the level whose\n"
+		"tag name has this in it." },
 	{ "display.viewmodel_shield", _config_boolean, "false", "HALO_VIEWMODEL_SHIELD", _environment_value, _platform_all,
 		"The energy shield's flare on the first-person arms too, as on the body\n"
 		"(the stock game draws it on the body only)." },

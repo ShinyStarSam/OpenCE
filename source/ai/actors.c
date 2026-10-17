@@ -318,6 +318,7 @@ symbols in this file:
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
 #include "networking/network_game_globals.h"
+#include "kevin_bot.h" /* port: port/linux/game/kevin_bot.c, the AI drives Kevin's unit */
 
 /* ---------- constants */
 
@@ -4167,7 +4168,12 @@ static void actor_unit_control(
 	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3850, &control_data.looking_vector);
 	match_assert("c:\\halo\\SOURCE\\ai\\actors.c", 3851, (fabs(control_data.throttle.i) <= 1.0f) && (fabs(control_data.throttle.j) <= 1.0f) && (fabs(control_data.throttle.k) <= 1.0f));
 
-	if (unit->unit.player_index == NONE || !player_input_enabled())
+	/* port: Kevin's look turns smoothly toward where he means to look (kevin.enabled) */
+	kevin_bot_adjust_control(actor_index, &control_data);
+
+	/* port: and Kevin's, a player whose unit the AI drives (kevin.enabled) */
+	if (unit->unit.player_index == NONE || !player_input_enabled() ||
+		kevin_bot_drives_unit(actor->meta.unit_index))
 	{
 		if (actor->meta.frozen)
 		{
