@@ -1,0 +1,4 @@
+models/
+# S0 measurements and recordings (Breeze outputs fall under its non-commercial licence)
+tools/s0/out/
+__pycache__/
