@@ -313,6 +313,9 @@ static const struct config_setting config_settings[] =
 		"Kevin, an AI companion: in a campaign level played alone on this\n"
 		"computer, a Spartan at your side whom the game's AI drives\n"
 		"(kevin_bot.c). A prototype; false plays the campaign without him." },
+	{ "kevin.port", _config_integer, "2324", "HALO_KEVIN_PORT", _environment_value, _platform_desktop,
+		"The port on 127.0.0.1 that Kevin's sidecar connects to (kevin_bridge.c,\n"
+		"kevin/BRIDGE_PLAN.md); 0 for none." },
 	{ "kevin.actor_variant", _config_string, "\"marine_armored assault rifle\"", "HALO_KEVIN_ACTOR_VARIANT",
 		_environment_value, _platform_desktop,
 		"The AI that drives Kevin: the first actor variant of the level whose\n"

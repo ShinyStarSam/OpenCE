@@ -122,6 +122,7 @@ symbols in this file:
 #include "lruv_cache.h"
 #include "memory_pool.h"
 #include "cluster_partitions.h"
+#include "kevin_bridge.h" /* port: port/linux/game/kevin_bridge.c, Kevin's sidecar */
 /* port: object_bounds_cache.c's */
 void object_bounds_cache_invalidate(void);
 
@@ -328,6 +329,9 @@ void game_state_save(
 	game_state_globals.saved_game_valid = (game_state_write_to_file()!=FALSE);
 	main_start_time();
 	game_state_note_event("checkpoint saved");
+	/* port: Kevin's sidecar rolls back with the checkpoints (kevin.enabled) */
+	if (game_state_globals.saved_game_valid)
+		kevin_bridge_checkpoint(FALSE);
 
 	return;
 }
@@ -368,6 +372,9 @@ void game_state_revert(
 		main_reset_map();
 	}
 	game_state_call_after_load_procs();
+	/* port: (kevin.enabled) */
+	if (game_state_globals.saved_game_valid)
+		kevin_bridge_checkpoint(TRUE);
 
 	return;
 }

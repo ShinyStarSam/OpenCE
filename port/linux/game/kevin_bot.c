@@ -50,7 +50,9 @@ does with his unit.
 #include "units/units.h"
 
 #include "kevin_bot.h"
+#include "kevin_bridge.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* port_config.c's */
@@ -287,10 +289,13 @@ static long kevin_bot_unit(
 	unit = unit_try_and_get(kevin_bot_globals.unit_index);
 	if (!unit || unit->unit.player_index != NONE)
 	{
+		long gone_unit_index = kevin_bot_globals.unit_index;
+
 		error(_error_silent, "kevin: his unit 0x%08X is gone (%s)",
-			kevin_bot_globals.unit_index, unit ? "a player has it" : "deleted");
+			gone_unit_index, unit ? "a player has it" : "deleted");
 		kevin_bot_globals.unit_index = NONE;
 		kevin_bot_globals.dead_ticks = KEVIN_RESPAWN_TICKS;
+		kevin_bridge_event("kevin_gone", "Kevin's unit is gone.", gone_unit_index, FALSE, NULL);
 		return NONE;
 	}
 
@@ -697,6 +702,12 @@ static boolean kevin_bot_bring_to_you(
 	kevin_bot_globals.stranded_ticks = 0;
 	kevin_bot_globals.outside_ticks = 0;
 	error(_error_silent, "kevin: %s; brought to you at %.1f %.1f %.1f", why, point.x, point.y, point.z);
+	{
+		char fields[96];
+
+		snprintf(fields, sizeof(fields), "\"why\":\"%s\"", why);
+		kevin_bridge_event("kevin_brought", "Kevin was put behind you.", unit_index, FALSE, fields);
+	}
 
 	return TRUE;
 }
@@ -1006,6 +1017,13 @@ static real kevin_bot_look_target(
 	real_euler_angles2d angles;
 
 	kevin_bot_update_look_ahead(unit_index, your_unit_index);
+
+	/* where the sidecar has him aim (kevin_bridge.c), over everything */
+	if (kevin_bridge_look_target(unit_index, target))
+	{
+		*maximum_speed = KEVIN_LOOK_TURN_SPEED_COMBAT;
+		return KEVIN_LOOK_STIFFNESS_COMBAT;
+	}
 
 	if (actor->state.mode >= _kevin_actor_mode_combat)
 	{
@@ -1630,7 +1648,7 @@ real kevin_bot_fire_scale(
 	return 1.f;
 }
 
-void kevin_bot_adjust_control(
+static void kevin_bot_adjust_look(
 	long actor_index,
 	struct unit_control_data *control_data)
 {
@@ -1639,9 +1657,6 @@ void kevin_bot_adjust_control(
 	real_euler_angles2d target_angles;
 	real stiffness;
 	real maximum_speed;
-
-	if (!kevin_bot_drives_unit(actor->meta.unit_index))
-		return;
 
 	stiffness = kevin_bot_look_target(actor_index, control_data, &target, &maximum_speed);
 	if (normalize3d(&target) == 0.f)
@@ -1723,6 +1738,21 @@ void kevin_bot_adjust_control(
 	return;
 }
 
+void kevin_bot_adjust_control(
+	long actor_index,
+	struct unit_control_data *control_data)
+{
+	long unit_index = actor_get(actor_index)->meta.unit_index;
+
+	if (!kevin_bot_drives_unit(unit_index))
+		return;
+	kevin_bot_adjust_look(actor_index, control_data);
+	/* the sidecar's overlay on what the AI and his look made */
+	kevin_bridge_adjust_control(unit_index, control_data);
+
+	return;
+}
+
 void kevin_bot_set_talking(
 	long ticks)
 {
@@ -1752,6 +1782,7 @@ void kevin_bot_game_begin(
 		kevin_bot_globals.active = TRUE;
 		error(_error_silent, "kevin: this level has Kevin");
 	}
+	kevin_bridge_new_generation("a level started");
 
 	return;
 }
@@ -1784,6 +1815,8 @@ void kevin_bot_update(
 
 			object_get_origin(unit_index, &position);
 			error(_error_silent, "kevin: he died at %.1f %.1f %.1f", position.x, position.y, position.z);
+			kevin_bridge_event("kevin_died", "Kevin died.", unit_index, FALSE, NULL);
+			kevin_bridge_new_generation("Kevin died");
 		}
 		if (++kevin_bot_globals.dead_ticks < KEVIN_RESPAWN_TICKS)
 			return;
@@ -1792,6 +1825,8 @@ void kevin_bot_update(
 			return;
 		kevin_bot_globals.unit_index = unit_index;
 		kevin_bot_globals.dead_ticks = 0;
+		kevin_bridge_new_generation("Kevin was made");
+		kevin_bridge_event("kevin_made", "Kevin was made behind you.", unit_index, FALSE, NULL);
 	}
 	unit = unit_get(unit_index);
 

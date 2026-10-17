@@ -186,6 +186,7 @@ struct game_options;
 #include "profile_console.h" /* port: port/linux/game/profile_console.c */
 #endif
 #include "profile_sections.h" /* port: port/linux/include/profile_sections.h */
+#include "kevin_bridge.h" /* port: port/linux/game/kevin_bridge.c, Kevin's sidecar */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -355,6 +356,9 @@ void game_tick(
 	profile_scope(game_tick_remove_quitting_players_section, remove_quitting_players_from_game();)
 	profile_scope(game_tick_allegiance_section, game_allegiance_update();)
 	profile_scope(game_tick_units_section, units_update();)
+	/* port: what Kevin's sidecar sent, before the AI drives him this tick
+	(kevin.enabled) */
+	kevin_bridge_update();
 	/* (the host's actors drive the host's units, which a client of the
 	distributed netcode has from the host: its own would fight the host's
 	positions, and could place objects of their own) */
