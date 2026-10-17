@@ -9,10 +9,10 @@ one more of the AI's units at your side.
 
 He is made behind you, on the ground you stand on, once the level has
 started and no cutscene plays (kevin_bot_spawn), and made again there a
-while after he dies. His unit is given an actor: the level's actor variant
-named by kevin.actor_variant, in the first encounter on the structure BSP
-loaded, told to follow the first player; the actor and the encounter are
-kept active. The AI moves an encounter's actors among its firing
+while after he dies. His unit is given an actor of his own actor variant,
+the same on every map (kevin_tuning.c), on your side: in the first
+encounter of your side on the structure BSP loaded, or of none on a map
+with none; the actor and the encounter are kept active. The AI moves an encounter's actors among its firing
 positions, which can be across the level from you; when it sends Kevin to
 one more than a few units from you, he walks to you instead
 (kevin_bot_move_to_you), and stops near you.
@@ -24,6 +24,7 @@ does with his unit.
 #include "cseries.h"
 #include "cseries/errors.h"
 #include "ai/actor_definitions.h"
+#include "ai/actor_types.h"
 #include "ai/actors.h"
 #include "ai/ai_globals.h"
 #include "ai/ai_debug.h"
@@ -52,13 +53,13 @@ does with his unit.
 
 #include "kevin_bot.h"
 #include "kevin_bridge.h"
+#include "kevin_tuning.h"
 
 #include <stdio.h>
 #include <string.h>
 
 /* port_config.c's */
 int config_boolean(const char *name);
-char const *config_string(char const *name);
 
 /* main.c's */
 extern short player_spawn_count;
@@ -236,7 +237,6 @@ static struct
 	boolean active;              /* this game has Kevin */
 	long unit_index;             /* his, or NONE */
 	long dead_ticks;             /* since he died, or was last not there */
-	long actor_variant_index;    /* the level's, or NONE */
 	long encounter_index;        /* an encounter of the level, or NONE */
 	long log_ticks;
 	long stranded_ticks;          /* ticks he has stayed at still_position */
@@ -301,7 +301,7 @@ static struct
 	short your_last_rounds_loaded;
 	short your_shots;
 	short your_trigger_ticks;
-} kevin_bot_globals = { FALSE, NONE, 0, NONE, NONE, 0, 0, { 0.f, 0.f, 0.f }, FALSE };
+} kevin_bot_globals = { FALSE, NONE, 0, NONE, 0, 0, { 0.f, 0.f, 0.f }, FALSE };
 
 /* ---------- private code */
 
@@ -339,35 +339,64 @@ static long kevin_bot_unit(
 	return kevin_bot_globals.unit_index;
 }
 
-/* the first actor variant of the level whose tag name has kevin.actor_variant in it */
-static long kevin_bot_find_actor_variant(
-	void)
+/* whether an encounter is of your side: its team yours or an ally's, or,
+before it has any (an encounter takes its first unit's team), its squads
+human soldiers only (the scenario's actor palette's marines and crew) */
+static boolean kevin_bot_encounter_is_yours(
+	long encounter_index,
+	short your_team)
 {
-	char const *wanted = config_string("kevin.actor_variant");
-	struct tag_iterator iterator;
-	long tag_index;
+	struct scenario *scenario = global_scenario_get();
+	struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+		&scenario->ai_encounters,
+		encounter_index,
+		struct encounter_definition);
+	short team = encounter_get(encounter_index)->team_index;
+	boolean soldiers = FALSE;
+	long squad_index;
 
-	tag_iterator_new(&iterator, ACTOR_VARIANT_DEFINITION_TAG);
-	while ((tag_index = tag_iterator_next(&iterator)) != NONE)
+	if (team != NONE && team != 0)
+		return team == your_team || game_team_is_ally(team, your_team);
+	for (squad_index = 0; squad_index < encounter->squads.count; squad_index++)
 	{
-		char const *name = tag_get_name(tag_index);
+		struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(&encounter->squads, squad_index, struct squad_definition);
+		long variant_index;
+		long actor_index;
+		short type;
 
-		if (name && wanted && wanted[0] && strstr(name, wanted))
-			return tag_index;
+		if (squad->actor_palette_index < 0 || squad->actor_palette_index >= scenario->ai_actor_palette.count)
+			continue;
+		variant_index = TAG_BLOCK_GET_ELEMENT(&scenario->ai_actor_palette, squad->actor_palette_index,
+			struct tag_reference)->index;
+		if (variant_index == NONE)
+			continue;
+		actor_index = actor_variant_definition_get(variant_index)->actor_reference.index;
+		if (actor_index == NONE)
+			continue;
+		type = actor_definition_get(actor_index)->type;
+		if (type != _actor_marine && type != _actor_crew)
+			return FALSE;
+		soldiers = TRUE;
 	}
 
-	return NONE;
+	return soldiers;
 }
 
-/* the first encounter of the level on the structure BSP loaded: only an
-active encounter's actors are updated (actors_update), and one on another
-BSP is never active */
+/* the first encounter of your side on the structure BSP loaded (NONE: the
+level has none; he is then of no encounter, on your team): an actor takes
+its encounter's team, only an active encounter's actors are updated
+(actors_update), and one on another BSP is never active */
 static long kevin_bot_find_encounter(
 	void)
 {
 	struct scenario *scenario = global_scenario_get();
+	long your_unit_index = kevin_bot_player_unit(0);
+	short your_team;
 	long encounter_index;
 
+	if (your_unit_index == NONE)
+		return NONE;
+	your_team = unit_get(your_unit_index)->object.owner_team_index;
 	for (encounter_index = 0; encounter_index < scenario->ai_encounters.count; encounter_index++)
 	{
 		struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
@@ -377,7 +406,8 @@ static long kevin_bot_find_encounter(
 
 		if (encounter->squads.count > 0 &&
 			(encounter->runtime_structure_bsp_reference_index == NONE ||
-			encounter->runtime_structure_bsp_reference_index == global_structure_bsp_index))
+			encounter->runtime_structure_bsp_reference_index == global_structure_bsp_index) &&
+			kevin_bot_encounter_is_yours(encounter_index, your_team))
 		{
 			return encounter_index;
 		}
@@ -391,21 +421,18 @@ static void kevin_bot_attach_actor(
 {
 	long actor_index;
 
-	if (kevin_bot_globals.actor_variant_index == NONE)
-		kevin_bot_globals.actor_variant_index = kevin_bot_find_actor_variant();
 	if (kevin_bot_globals.encounter_index == NONE)
 		kevin_bot_globals.encounter_index = kevin_bot_find_encounter();
-	if (kevin_bot_globals.actor_variant_index == NONE)
+	if (kevin_tuning_variant_index() == NONE)
 	{
-		error(_error_silent, "kevin: no actor variant in this level has \"%s\" in its name",
-			config_string("kevin.actor_variant"));
+		error(_error_silent, "kevin: no actor variant of his (the tag table had no room)");
 		return;
 	}
 
 	actor_index = actor_create_for_unit(
 		FALSE,
 		unit_index,
-		kevin_bot_globals.actor_variant_index,
+		kevin_tuning_variant_index(),
 		kevin_bot_globals.encounter_index,
 		kevin_bot_globals.encounter_index != NONE ? 0 : NONE,
 		FALSE,
@@ -417,7 +444,7 @@ static void kevin_bot_attach_actor(
 		0);
 	error(_error_silent, "kevin: actor 0x%08X (%s) for unit 0x%08X in encounter %ld",
 		actor_index,
-		tag_get_name(kevin_bot_globals.actor_variant_index),
+		tag_get_name(kevin_tuning_variant_index()),
 		unit_index,
 		kevin_bot_globals.encounter_index);
 
@@ -1010,6 +1037,9 @@ static long kevin_bot_spawn(
 	unit_index = object_new(&placement_data);
 	if (unit_index == NONE)
 		return NONE;
+	/* (on your side: his actor takes his unit's team on a map with no
+	encounter of yours) */
+	unit_get(unit_index)->object.owner_team_index = unit_get(your_unit_index)->object.owner_team_index;
 	/* (as player_spawn: the first profile, when the scenario has any) */
 	if (*(long *)((byte *)global_scenario_get() + 0x348) != 0)
 		player_add_equipment(unit_index, 0, TRUE);
@@ -1922,6 +1952,19 @@ static void kevin_bot_adjust_look(
 	}
 
 	vector3d_from_euler_angles2d(&control_data->aiming_vector, &kevin_bot_globals.look);
+	/* at the ends of his accuracy, his aim is his tuning's (kevin_tuning.c) */
+	if (actor->state.mode >= _kevin_actor_mode_combat)
+	{
+		real_vector3d aim;
+
+		if (kevin_tuning_aim(actor_index, &aim))
+		{
+			control_data->aiming_vector = aim;
+			euler_angles2d_from_vector3d(&kevin_bot_globals.look, &aim);
+			kevin_bot_globals.look_velocity.yaw = 0.f;
+			kevin_bot_globals.look_velocity.pitch = 0.f;
+		}
+	}
 	control_data->looking_vector = control_data->aiming_vector;
 
 	/* his body faces where he looks: a biped aims only so far from its
@@ -2028,7 +2071,6 @@ void kevin_bot_game_begin(
 	kevin_bot_globals.active = FALSE;
 	kevin_bot_globals.unit_index = NONE;
 	kevin_bot_globals.dead_ticks = KEVIN_RESPAWN_TICKS;
-	kevin_bot_globals.actor_variant_index = NONE;
 	kevin_bot_globals.encounter_index = NONE;
 	kevin_bot_globals.look_valid = FALSE;
 	kevin_bot_globals.last_aim_valid = FALSE;
@@ -2048,6 +2090,7 @@ void kevin_bot_game_begin(
 		kevin_bot_globals.active = TRUE;
 		error(_error_silent, "kevin: this level has Kevin");
 		kevin_bot_log_bsp_switches();
+		kevin_tuning_level_begin();
 	}
 	kevin_bridge_new_generation("a level started");
 	{

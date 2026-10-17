@@ -138,6 +138,7 @@ symbols in this file:
 #include "units/bipeds.h"
 #include "units/units.h"
 #include "units/vehicles.h"
+#include "kevin_tuning.h" /* port: port/linux/game/kevin_tuning.c, Kevin's combat tuning */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -1513,6 +1514,8 @@ void object_cause_damage(
 		total_damage *= game_difficulty_get_value(_game_difficulty_value_enemy_damage);
 		damage_was_modified = TRUE;
 	}
+	/* port: Kevin's damage dealt and taken (kevin.enabled) */
+	total_damage *= kevin_tuning_damage_scale(damage->owner_object_index, object_index);
 
 	damaged_object_count = 0;
 	material_effect_recorded = FALSE;

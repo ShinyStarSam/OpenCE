@@ -230,6 +230,7 @@ symbols in this file:
 #include "sound/sound_definitions.h"
 #include "units/unit_definitions.h"
 #include "units/units.h"
+#include "kevin_tuning.h" /* port: port/linux/game/kevin_tuning.c, Kevin's combat tuning */
 
 #ifdef HALO_PORT_MAXIMUM_NETWORK_PLAYERS
 #include "bitmaps/bitmap_group.h"
@@ -2475,7 +2476,9 @@ static void trigger_create_projectiles(
 
 				target_object_index= player_aim_projectile(player_index, &origin, &forward);
 			}
-			else if (actor_index!=NONE)
+			/* port: and Kevin's at the ends of his accuracy go his tuning's way,
+			not the AI's (kevin.enabled) */
+			else if (actor_index!=NONE && !kevin_tuning_aim_projectile(actor_index, &origin, &forward))
 			{
 				target_object_index= actor_aim_projectile(actor_index, &origin, &forward, &error);
 			}
@@ -2537,8 +2540,10 @@ static void trigger_create_projectiles(
 					error= (1.0f-fraction)*trigger_definition->projectile_error_angle_lower_bound + fraction*trigger_definition->projectile_error_angle_upper_bound;
 				}
 
-				if (!TEST_FLAG(trigger_definition->flags, _weapon_trigger_use_error_when_unzoomed_bit) ||
-					!TEST_FLAG(weapon->weapon.control_flags, _weapon_control_zoomed_bit))
+				/* port: Kevin's shots go where he aims at the ends of his accuracy (kevin.enabled) */
+				if (!kevin_tuning_exact_shot(projectile_owner_object_index) &&
+					(!TEST_FLAG(trigger_definition->flags, _weapon_trigger_use_error_when_unzoomed_bit) ||
+					!TEST_FLAG(weapon->weapon.control_flags, _weapon_control_zoomed_bit)))
 				{
 					random_vector_in_cone3d(&data.forward, trigger_definition->projectile_error_inner_cone_angle, error, &data.forward);
 				}

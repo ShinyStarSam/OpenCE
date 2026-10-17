@@ -31,6 +31,11 @@ ACTIONS = {
     # tier 0's stealth: he crouches when you do, and holds fire until you fire
     "stealth": (["stealth mode", "go quiet", "stay quiet", "keep quiet", "quiet now", "sneak"],
                 [{"type": "rules", "stealth": True, "hold_fire_until_engaged": True}], "ack"),
+    # how he fights (kevin_tuning.c's presets)
+    "god_mode": (["god mode", "go god mode", "solo it"], [{"type": "tuning", "preset": "god"}], "ack"),
+    "carry_less": (["stop carrying me", "go easy", "take it easy", "tone it down"],
+                   [{"type": "tuning", "preset": "kevin"}], "ack"),
+    "serious": (["get serious", "try harder", "stop holding back"], [{"type": "tuning", "preset": "veteran"}], "ack"),
     # after firing back at you
     "calm": (["calm down", "stand down", "it was an accident", "my bad", "sorry"],
              [{"type": "set_hostile", "on": False}], "ack"),

@@ -33,6 +33,10 @@ him; in stealth he crouches when you do; and he holds his fire until you
 fire or he is hit. With debug.kevin_bridge_test, `test` makes their causes
 happen, for the scripted check (kevin/tools/m3_rules_test.py).
 
+`tuning` changes how he fights (kevin_tuning.c): a preset, or settings;
+`state` says them, with his shots and hits since the level began. The
+sidecar gone, he fights as himself again.
+
 The sidecar's commands lay an overlay on the AI's control of Kevin
 (`press`, `hold`, `fire_mode`, `aim_at`); the AI keeps running beneath,
 and takes over again as the overlay ends. `release` clears it at once, as
@@ -63,6 +67,7 @@ with a reason, never applied in part.
 
 #include "kevin_bot.h"
 #include "kevin_bridge.h"
+#include "kevin_tuning.h"
 #include "kevin_view.h"
 #include "../src/voice_audio.h"
 
@@ -1451,6 +1456,81 @@ static void kevin_bridge_command(
 		kevin_bridge_send_result(id, TRUE, "urgent types set");
 		return;
 	}
+	if (!strcmp(type, "tuning"))
+	{
+		char preset[KEVIN_MAXIMUM_TYPE_LENGTH];
+		long preset_index = kevin_json_find(&json, 0, "preset");
+		long settings_index = kevin_json_find(&json, 0, "settings");
+		long members = 0;
+		long found = 0;
+		long setting;
+
+		if (preset_index != NONE &&
+			(!kevin_json_get_string(&json, preset_index, preset, sizeof(preset)) ||
+				(strcmp(preset, "useless") && strcmp(preset, "kevin") && strcmp(preset, "veteran") &&
+					strcmp(preset, "master_chief") && strcmp(preset, "god"))))
+		{
+			kevin_bridge_send_result(id, FALSE, "preset is useless, kevin, veteran, master_chief or god");
+			return;
+		}
+		/* (every setting checked before any is taken: known, and a number in
+		its range) */
+		if (settings_index != NONE)
+		{
+			if (json.tokens[settings_index].type != _kevin_json_object)
+			{
+				kevin_bridge_send_result(id, FALSE, "settings is not an object");
+				return;
+			}
+			for (token_index = settings_index + 1; token_index < json.count; token_index++)
+			{
+				if (json.tokens[token_index].parent == settings_index)
+					members++;
+			}
+			for (setting = 0; setting < kevin_tuning_setting_count(); setting++)
+			{
+				token_index = kevin_json_find(&json, settings_index, kevin_tuning_setting_name(setting));
+				if (token_index == NONE)
+					continue;
+				found++;
+				if (!kevin_json_get_number(&json, token_index, &number))
+				{
+					kevin_bridge_send_result(id, FALSE, "a setting is not a number");
+					return;
+				}
+			}
+			if (found != members)
+			{
+				kevin_bridge_send_result(id, FALSE, "settings has one that isn't a setting");
+				return;
+			}
+		}
+		{
+			/* (out of range: the preset, and those before it, are taken back) */
+			real before[16];
+
+			for (setting = 0; setting < kevin_tuning_setting_count() && setting < (long)NUMBEROF(before); setting++)
+				before[setting] = kevin_tuning_setting_value(setting);
+			if (preset_index != NONE)
+				kevin_tuning_preset(preset);
+			for (setting = 0; settings_index != NONE && setting < kevin_tuning_setting_count(); setting++)
+			{
+				token_index = kevin_json_find(&json, settings_index, kevin_tuning_setting_name(setting));
+				if (token_index != NONE && kevin_json_get_number(&json, token_index, &number) &&
+					!kevin_tuning_set(kevin_tuning_setting_name(setting), (real)number))
+				{
+					long back;
+
+					for (back = 0; back < kevin_tuning_setting_count() && back < (long)NUMBEROF(before); back++)
+						kevin_tuning_set(kevin_tuning_setting_name(back), before[back]);
+					kevin_bridge_send_result(id, FALSE, "a setting is out of its range");
+					return;
+				}
+			}
+		}
+		kevin_bridge_send_result(id, TRUE, "tuned");
+		return;
+	}
 	if (!strcmp(type, "rules"))
 	{
 		boolean hostile = kevin_bridge_globals.rule_hostile;
@@ -1720,6 +1800,7 @@ static void kevin_bridge_disconnect(
 	kevin_bridge_globals.rule_hold_until_engaged = FALSE;
 	kevin_bridge_globals.test_you_crouch = NONE;
 	kevin_bridge_globals.test_you_fired = FALSE;
+	kevin_tuning_reset();
 
 	return;
 }
@@ -2054,6 +2135,19 @@ static void kevin_bridge_send_state(
 	kevin_bridge_append_unit(message, sizeof(message), &length, "kevin", kevin_unit_index);
 	kevin_bridge_append(message, sizeof(message), &length, ",");
 	kevin_bridge_append_object(message, sizeof(message), &length, "crosshair", player_control_get_target_object_index(0));
+	{
+		long setting;
+
+		kevin_bridge_append(message, sizeof(message), &length, ",\"tuning\":{\"preset\":");
+		kevin_bridge_append_string(message, sizeof(message), &length, kevin_tuning_preset_name());
+		for (setting = 0; setting < kevin_tuning_setting_count(); setting++)
+		{
+			kevin_bridge_append(message, sizeof(message), &length, ",\"%s\":%.2f",
+				kevin_tuning_setting_name(setting), kevin_tuning_setting_value(setting));
+		}
+		kevin_bridge_append(message, sizeof(message), &length, "},\"kevin_shots\":%ld,\"kevin_hits\":%ld",
+			kevin_tuning_shots(), kevin_tuning_hits());
+	}
 	kevin_bridge_append(message, sizeof(message), &length, ",\"nearby\":[");
 
 	/* the units near you, but you and him */

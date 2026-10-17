@@ -221,16 +221,17 @@ played alone on this computer gets him:
 - **Made behind you** once the level has started and no cutscene plays:
   the player's biped (`game_globals->player_information[0].player_unit`,
   as `player_spawn` makes yours), in his own armour colour, with the
-  scenario's first starting profile (`player_add_equipment`), on the
-  ground you stand on, walked along it from under you so he is never put
-  inside a slope or past a wall.
+  scenario's first starting profile (`player_add_equipment`), on your
+  trail: a spot you stood on a moment ago, so never inside rock or past a
+  wall (M3).
 - **Made again** there 10 seconds after he dies, and at once when a revert
   takes his unit away (a cutscene's skip reverts to a saved game; a
   checkpoint from before he was made has no Kevin in it).
-- **His actor:** the level's actor variant named by `kevin.actor_variant`
-  (a marine with an assault rifle by default), in the first encounter on
-  the BSP loaded, kept active and never dormant. Its team comes from the
-  encounter.
+- **His actor:** his own actor variant and actor definition, the same on
+  every map whatever actors it has (`kevin_tuning.c`, M4), on your team:
+  in the first encounter of your side on the BSP loaded (its team set to
+  yours or an ally's, or its squads only human soldiers), or of none on a
+  map with none. Kept active and never dormant.
 
 The first prototype made him co-op player 2. That gave co-op's respawns
 and cutscene handling for free, but split the screen, gave him a sound
@@ -262,16 +263,29 @@ The actor variant sets reaction times and accuracy; see "Combat tuning".
 
 ### Combat tuning: from useless to solo-the-game
 
-At map load the bridge copies the chosen marine actor variant (and its
-actor definition) into its own memory and points Kevin's actor at the
-copy. The sidecar can then change any of these at any time, from the web
-UI, a preset or the brain:
+Kevin's actor variant and actor definition are his own, made in code
+(`port/linux/game/kevin_tuning.c`) and added to the tag table at each
+level's start as `kevin\actor variant` and `kevin\actor`, so he is the
+same Spartan on every map, marines or none. His numbers began as the
+campaign marine's (a soldier of the same training) and differ where he is
+a Spartan: full weapon damage (a marine's is scaled to 0.6), his body's own
+health and shields. The sidecar changes settings (`tuning`) at any time,
+from the web UI, a preset or the brain, each worked into his tags from
+that baseline, 50 (or × 1) being his own. Built in M4: accuracy, damage
+dealt and taken, rate of fire, reaction, grenades, cover, aggression.
+Still to come: grenade accuracy, awareness, melee, dodging.
+
+At the ends of accuracy the AI's aim is set aside: for an AI unit the
+weapon aims each round at the AI's target itself (`actor_aim_projectile`,
+whatever the unit points at), so Kevin's rounds there go from his gun the
+tuning's way, without the weapon's spread (hooks in `weapons.c`).
+
 
 | Setting | Range | Done by |
 | --- | --- | --- |
-| **Accuracy** | 0 = never hits … 100 = every shot lands | Variant: `projectile_error_angle`, `error_angle_modifier`, `target_track_fraction`, `target_lead_fraction`. At the ends, the aim overlay takes over: at 0 it aims just outside the target's bounding sphere every shot; at 100 it aims at the head marker with full lead, and the weapon's own spread is zeroed for Kevin's shots |
-| **Damage dealt** | × 0 … × 10 | `weapon_damage_modifier`, plus a multiplier on damage whose owner is Kevin (hook in `object_cause_damage`) |
-| **Damage taken** | × 0 (invulnerable) … × 10 | Multiplier in `unit_damage_aftermath` when the victim is Kevin |
+| **Accuracy** | 0 = never hits … 100 = every shot lands | Variant: `projectile_error_angle`, `target_track_fraction`, `target_lead_fraction`. At the ends his aim and rounds are the tuning's: at 0 just outside his target's bounding sphere (of the vehicle it rides in, if it rides), at 100 its head, led by his round's speed, with no spread |
+| **Damage dealt** | × 0 … × 10 | A multiplier on damage whose owner is Kevin (hook in `object_cause_damage`) |
+| **Damage taken** | × 0 (invulnerable) … × 10 | The same hook, when the victim is Kevin |
 | **Rate of fire / bursts** | Slow and hesitant … continuous | `rate_of_fire`, burst duration and separation, firing patterns |
 | **Grenade frequency** | Never … whenever there's a target | Grenade chance and check time, the unlimited-grenades flag |
 | **Grenade accuracy** | Wild … lands on the target | Trajectory solving: scatter added to the AI's throw, or an exact solve at 100 |
@@ -282,9 +296,10 @@ UI, a preset or the brain:
 | **Melee** | Never … leaps at anything in range | Melee range, leap chance and range |
 | **Dodging** | Never … dives from every grenade | Grenade dive chance, evasion chance, tier-0 grenade dive |
 
-Presets: **Useless**, **Marine**, **Spartan**, **Master Chief**,
-**God mode** (100 accuracy, invulnerable, × 10 damage, instant reactions,
-perfect grenades: he can solo the campaign). Kevin can also be told in
+Presets: **useless**, **kevin** (his own, and what he is again when the
+sidecar goes), **veteran**, **master_chief**, **god** (100 accuracy,
+invulnerable, × 10 damage, instant reactions, grenades without end: he can
+solo the campaign). Kevin can also be told in
 game ("Kevin, stop carrying me") and the brain moves the sliders within
 limits you set.
 
@@ -606,7 +621,7 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 | M1 | **Done.** `kevin_bridge.c`: settings, socket read every tick, framing, `state`, events with `kevin_in_range` / `kevin_saw` / `kevin_did`, batches and `urgent` types, checkpoint ids, the control overlay hook, `applied` timestamps and `action_result`, the fail-safe; the fake game and recorder | Python sends `press jump`; `applied` comes back on the next tick (≤ 33 ms in game); killing the sidecar hands Kevin back to the AI (met: `applied` on the next tick, p50 16 ms, p95 32 ms over 20 tries at 60 fps; silence and a closed socket both hand him back; `kevin/tools/m1_bridge_test.py`) |
 | M2 | **Done.** **Reflex vertical slice:** push-to-talk from the game key → sliding-window Parakeet → tier-1 keywords including stop / cancel → overlay; bark cache with `ack` lines; latency logging; replay tests | "Kevin, jump" ≤ 250 ms p95, bark ≤ 300 ms, over 50 tries (met: in the game at 60 fps, jump p50 62 ms, p95 149 ms after speech ends; the bark the same; 20 of 20 commands right, questions and "don't" left alone; `kevin/tools/m2_reflex_test.py`, speech from Windows' voices given to the hearing, so the microphone's own delay of about a tick isn't counted) |
 | M3 | **Done.** Kevin across level loads, BSP switches and checkpoint reverts (made again or moved to the new BSP's encounter), generations, tier-0 rules (hostile, grenade dive, stealth crouch, hold fire) | Each rule fires the same tick in a scripted test (met: `kevin/tools/m3_rules_test.py` in the game, each `reflex_fired` on its cause's tick, none with the rules off; he fires back and crouches in `state`, and runs from grenades, seen in play. Across a30's BSP switch both ways, `kevin/tools/m3_bsp_test.py`: he joined an encounter of the new BSP and was beside you after it) |
-| M4 | **Combat tuning:** private variant copy, every setting, damage multipliers, the aim overlay extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening |
+| M4 | **Done.** **Combat tuning:** his own variant and actor definition on every map, eight settings, damage multipliers, the aim extremes, presets | At 0 accuracy Kevin lands no hits in a long fight; at 100 every shot lands; God mode solos the a30 opening (`kevin/tools/m4_tuning_test.py`, played on d20, which has no marines: at 100, 60 hits of 60 shots; at 0, none on his target and 5 of 60 on grunts beside it; god mode, no deaths through a30's opening and d20's first fights) |
 | M5 | Tasks via runtime command lists: `move_to`, `follow`, `wait_here`, `attack`, `enter_vehicle`; tier-2 classifier with crosshair hints, trained first on Kevin's commands (the training part of SIDECAR_PLAN.md S14, brought forward: untrained Kev picked the right action about half the time from real speech in S0) | "Stand by that rock" moving ≤ 400 ms p95; 95% of a held-out set of spoken commands get the right action |
 | M6 | Keeping up: stuck detection, catch-up teleport, scripted moves, cutscene events | Kevin is beside you after every cutscene and Pelican drop through a30 and a50 |
 | M7 | The rest of the events: dialogue text from the offline table (Parakeet, corrected by the scripts' lines), objective, checkpoints, level load | Cortana's lines arrive as exact text through the a30 opening |
@@ -644,8 +659,9 @@ scenario variants) is the sidecar's; see SIDECAR_PLAN.md.
 - **Overlay vs AI:** does the AI fight the overlay (e.g. re-crouching or
   firing the tick after the mask ends)? The overlay may need to hold for
   a few ticks or set the actor's own state too. (M1)
-- **Actor variant per map:** which marine variant each level has; pick one
-  at map load.
+- **Misses at accuracy 0:** aimed to the side of his target, a round can
+  still hit the one beside it (5 of 60 on d20). Over its head may do
+  better.
 - **Patching the command-list block:** check nothing else holds the old
   address or validates the count (tag validator, saved games, BSP
   switches).

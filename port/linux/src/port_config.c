@@ -316,10 +316,6 @@ static const struct config_setting config_settings[] =
 	{ "kevin.port", _config_integer, "2324", "HALO_KEVIN_PORT", _environment_value, _platform_desktop,
 		"The port on 127.0.0.1 that Kevin's sidecar connects to (kevin_bridge.c,\n"
 		"kevin/BRIDGE_PLAN.md); 0 for none." },
-	{ "kevin.actor_variant", _config_string, "\"marine_armored assault rifle\"", "HALO_KEVIN_ACTOR_VARIANT",
-		_environment_value, _platform_desktop,
-		"The AI that drives Kevin: the first actor variant of the level whose\n"
-		"tag name has this in it." },
 	{ "display.viewmodel_shield", _config_boolean, "false", "HALO_VIEWMODEL_SHIELD", _environment_value, _platform_all,
 		"The energy shield's flare on the first-person arms too, as on the body\n"
 		"(the stock game draws it on the body only)." },

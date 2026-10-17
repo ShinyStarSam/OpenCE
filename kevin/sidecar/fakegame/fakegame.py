@@ -53,6 +53,17 @@ WITNESS_DISTANCE = 40.0
 WITNESS_COSINE = 0.5
 RESPAWN_TICKS = 10 * TICKS_PER_SECOND
 HEARING_FRAME_BYTES = 2 * 320          # 20 ms at 16 kHz
+# the game's tuning settings, their ranges, and presets (kevin_tuning.c)
+TUNING_RANGES = {"accuracy": 100, "damage_dealt": 10, "damage_taken": 10, "rate_of_fire": 100, "reaction": 100,
+                 "grenades": 100, "cover": 100, "aggression": 100}
+TUNING_PRESETS = {
+    name: dict(zip(TUNING_RANGES, values)) for name, values in {
+        "useless": (0, 0.2, 3, 20, 0, 0, 0, 20),
+        "kevin": (50, 1, 1, 50, 50, 50, 50, 50),
+        "veteran": (75, 1.5, 0.6, 65, 75, 60, 60, 60),
+        "master_chief": (90, 2.5, 0.35, 75, 90, 70, 70, 75),
+        "god": (100, 10, 0, 100, 100, 100, 50, 100),
+    }.items()}
 VOICE_QUEUE_SAMPLES = 10 * 48000
 
 FLAGS = ("crouch", "jump", "flashlight", "action", "reload", "fire", "fire_secondary", "grenade", "swap_weapons")
@@ -109,6 +120,8 @@ class FakeGame:
     def __init__(self, port, seed=1, revert_seconds=120.0, log=print, test=False):
         self.port = port
         self.test = test
+        # how Kevin fights (the game's kevin_tuning.c)
+        self.tuning = dict(TUNING_PRESETS["kevin"], preset="kevin")
         # tier 0
         self.rules = {"hostile": False, "hits": 2, "seconds": 3.0, "fire_seconds": 5.0, "dive": False,
                       "distance": 3.0, "stealth": False, "hold": False}
@@ -289,6 +302,27 @@ class FakeGame:
         if kind == "request_view":
             self.result(command_id, True, "view asked for")
             return
+        if kind == "tuning":
+            preset = message.get("preset")
+            settings = message.get("settings", {})
+            if preset is not None and preset not in TUNING_PRESETS:
+                raise Refused(command_id, "preset is useless, kevin, veteran, master_chief or god")
+            if not isinstance(settings, dict):
+                raise Refused(command_id, "settings is not an object")
+            if any(key not in TUNING_RANGES for key in settings):
+                raise Refused(command_id, "settings has one that isn't a setting")
+            if not all(number(value) for value in settings.values()):
+                raise Refused(command_id, "a setting is not a number")
+            if any(not 0 <= value <= TUNING_RANGES[key] for key, value in settings.items()):
+                raise Refused(command_id, "a setting is out of its range")
+            if preset is not None:
+                self.tuning = dict(TUNING_PRESETS[preset], preset=preset)
+            for key, value in settings.items():
+                if self.tuning[key] != value:
+                    self.tuning["preset"] = ""
+                self.tuning[key] = value
+            self.result(command_id, True, "tuned")
+            return
         if kind == "rules":
             self.set_rules(message, command_id)
             return
@@ -468,6 +502,7 @@ class FakeGame:
         self.sending = b""
         self.release_overlay("the sidecar is gone")
         self.rules.update(hostile=False, dive=False, stealth=False, hold=False)
+        self.tuning = dict(TUNING_PRESETS["kevin"], preset="kevin")
         self.hostile_ticks = 0
         self.hearing = False
         self.voice_samples = 0
@@ -699,6 +734,7 @@ class FakeGame:
         self.send({"type": "state", "tick": self.tick, "generation": self.generation,
                    "overlay": self.overlay_active(), "you": self.you.state(),
                    "kevin": self.kevin.state() if self.kevin else None,
+                   "tuning": dict(self.tuning), "kevin_shots": 0, "kevin_hits": 0,
                    "crosshair": None, "nearby": nearby})
 
     # ---- the loop

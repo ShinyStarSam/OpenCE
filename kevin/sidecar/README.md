@@ -30,7 +30,9 @@ Talking over him cuts him off. Tier 0 runs in the game (`RULES` in
 `kevin.py`): he fires back for 3 seconds after two hits by you within 3,
 and runs from a grenade within 3 units; "stealth mode" has him crouch when
 you do and hold his fire until you fire, "go loud" ends it, and "calm down"
-or "sorry" stops his firing back. Each reflex's stages are timed into
+or "sorry" stops his firing back. How he fights is tuned in the game
+(`tuning`): "god mode", "stop carrying me" (his own) and "get serious"
+(veteran). Each reflex's stages are timed into
 `logs/latency-*.jsonl`, and p50 / p95 are printed on exit.
 
 The barks are made by `kevin/tools/make_barks.py`, in Kevin's voice with
@@ -60,6 +62,13 @@ before the level's switch and checks on him after it:
 
 ```bash
 python kevin/tools/m3_bsp_test.py
+```
+
+M4's check, played: accuracy 0, then 100, then god mode, counting his
+shots and hits as you fight together:
+
+```bash
+python kevin/tools/m4_tuning_test.py [--phases 0,100,god]
 ```
 
 ## The fake game
